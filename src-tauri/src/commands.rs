@@ -218,14 +218,51 @@ pub fn asset_file_src(
     asset_id: String,
     rel: String,
 ) -> CmdResult<String> {
-    let asset_dir = store.asset_dir(&project, &asset_id)?;
-    // Resolve and confine to the asset directory (no path escape).
-    let candidate = asset_dir.join(&rel);
-    // Best-effort confinement: the workspace must contain the candidate.
+    let candidate = confined_asset_path(&config, &store, &project, &asset_id, &rel)?;
+    Ok(candidate.to_string_lossy().to_string())
+}
+
+/// Copy a workspace-relative asset file (e.g. `model.glb`) to an absolute `dest`
+/// chosen by the user via the native save dialog. The webview cannot write files
+/// itself, and an `<a download>` to the asset protocol does not trigger a real
+/// "Save As" in WebView2 (it navigates / hands the file to the shell instead —
+/// which is why a .glb was opening in Notepad). So we copy on the Rust side.
+#[tauri::command]
+pub fn save_asset_file(
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    rel: String,
+    dest: String,
+) -> CmdResult<()> {
+    let src = confined_asset_path(&config, &store, &project, &asset_id, &rel)?;
+    if !src.is_file() {
+        return Err(format!("fichier introuvable: {rel}"));
+    }
+    let dest = std::path::PathBuf::from(&dest);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::from)?;
+    }
+    std::fs::copy(&src, &dest)
+        .map_err(|e| AppError::msg(format!("échec de la copie vers {}: {e}", dest.display())))?;
+    Ok(())
+}
+
+/// Resolve `rel` under the asset dir and confine it to the workspace (no escape).
+fn confined_asset_path(
+    config: &Config,
+    store: &Store,
+    project: &str,
+    asset_id: &str,
+    rel: &str,
+) -> Result<std::path::PathBuf, AppError> {
+    let asset_dir = store.asset_dir(project, asset_id)?;
+    let candidate = asset_dir.join(rel);
     let workspace = config.workspace_dir()?;
     let inside = candidate.starts_with(&asset_dir) || crate::config::under(&workspace, &candidate);
     if !inside {
-        return Err(format!("chemin hors workspace: {rel}"));
+        return Err(AppError::msg(format!("chemin hors workspace: {rel}")));
     }
-    Ok(candidate.to_string_lossy().to_string())
+    Ok(candidate)
 }

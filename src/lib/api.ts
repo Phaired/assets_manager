@@ -97,6 +97,16 @@ export function assetFileSrc(
   return invoke<string>("asset_file_src", { project, assetId, rel });
 }
 
+/** Copy a workspace-relative asset file to a user-chosen absolute destination. */
+export function saveAssetFile(
+  project: string,
+  assetId: string,
+  rel: string,
+  dest: string,
+): Promise<void> {
+  return invoke<void>("save_asset_file", { project, assetId, rel, dest });
+}
+
 /** Resolve a workspace-relative asset file to a webview-loadable URL. */
 export async function assetFileUrl(
   project: string,

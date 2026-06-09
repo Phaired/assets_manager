@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { X, Save, Loader2, Play, Square } from "lucide-react";
+import { X, Save, Loader2, Play, Square, FolderOpen } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
 
 import type { ConfigPatch, Gen3d } from "../lib/types";
 import {
@@ -27,6 +28,19 @@ const GEN_NUMS: GenNum[] = [
   { key: "targetFaceNum", label: "Faces cible (réduction)", step: 1000 },
 ];
 
+type HunBackend = "v21" | "mv2";
+interface HunEntryForm {
+  dir: string;
+  python: string;
+  port: string;
+}
+type HunyuanForm = Record<HunBackend, HunEntryForm>;
+
+const HUN_LABELS: Record<HunBackend, string> = {
+  v21: "Hunyuan 2.1",
+  mv2: "Hunyuan 2mv",
+};
+
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const configQ = useConfig();
   const update = useUpdateConfig();
@@ -42,6 +56,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [timeout, setTimeoutVal] = useState("");
   const [backend, setBackend] = useState<"v21" | "mv2">("v21");
   const [gen, setGen] = useState<Gen3d | null>(null);
+  const [hun, setHun] = useState<HunyuanForm | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Hydrate form from config once loaded.
@@ -56,10 +71,40 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     setTimeoutVal(String(c.openaiTimeout));
     setBackend(c.defaultBackend);
     setGen(c.gen3d);
+    setHun({
+      v21: {
+        dir: c.hunyuan.v21.dir,
+        python: c.hunyuan.v21.python,
+        port: String(c.hunyuan.v21.port),
+      },
+      mv2: {
+        dir: c.hunyuan.mv2.dir,
+        python: c.hunyuan.mv2.python,
+        port: String(c.hunyuan.mv2.port),
+      },
+    });
   }, [configQ.data]);
 
   function setGenNum(k: keyof Gen3d, raw: string) {
     setGen((g) => (g ? { ...g, [k]: Number(raw) } : g));
+  }
+
+  function setHunField(b: HunBackend, k: keyof HunEntryForm, v: string) {
+    setHun((h) => (h ? { ...h, [b]: { ...h[b], [k]: v } } : h));
+  }
+
+  // Native pickers (Tauri dialog plugin) for the Hunyuan paths.
+  async function pickHunDir(b: HunBackend) {
+    const sel = await open({ directory: true, multiple: false });
+    if (typeof sel === "string") setHunField(b, "dir", sel);
+  }
+  async function pickHunPython(b: HunBackend) {
+    const sel = await open({
+      directory: false,
+      multiple: false,
+      filters: [{ name: "Python", extensions: ["exe"] }],
+    });
+    if (typeof sel === "string") setHunField(b, "python", sel);
   }
 
   async function save() {
@@ -82,6 +127,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       gen3d,
     };
     if (key.trim()) patch.openaiApiKey = key.trim();
+    if (hun) {
+      const entry = (e: HunEntryForm) => ({
+        dir: e.dir.trim(),
+        python: e.python.trim(),
+        port: Number(e.port),
+      });
+      patch.hunyuan = { v21: entry(hun.v21), mv2: entry(hun.mv2) };
+    }
     try {
       await update.mutateAsync(patch);
       onClose();
@@ -224,6 +277,63 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               Générer la texture
             </label>
           </div>
+
+          <h3>Backends 3D (Hunyuan)</h3>
+          <p className="muted small">
+            Pointe l'app vers tes installations Hunyuan3D (dossier du repo +
+            python de son venv). Requis pour la génération 3D locale.
+          </p>
+          {hun &&
+            (["v21", "mv2"] as HunBackend[]).map((b) => (
+              <div className="hun-block" key={b}>
+                <strong className="small">{HUN_LABELS[b]}</strong>
+                <label className="fld">
+                  Dossier du repo
+                  <div className="row path-row">
+                    <input
+                      className="input"
+                      value={hun[b].dir}
+                      placeholder="C:\\…\\Hunyuan3D-…"
+                      onChange={(e) => setHunField(b, "dir", e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      onClick={() => pickHunDir(b)}
+                    >
+                      <FolderOpen size={13} /> Parcourir
+                    </button>
+                  </div>
+                </label>
+                <label className="fld">
+                  Python (venv du serveur)
+                  <div className="row path-row">
+                    <input
+                      className="input"
+                      value={hun[b].python}
+                      placeholder="C:\\…\\.venv\\Scripts\\python.exe"
+                      onChange={(e) => setHunField(b, "python", e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      onClick={() => pickHunPython(b)}
+                    >
+                      <FolderOpen size={13} /> Parcourir
+                    </button>
+                  </div>
+                </label>
+                <label className="fld">
+                  Port
+                  <input
+                    type="number"
+                    className="input"
+                    value={hun[b].port}
+                    onChange={(e) => setHunField(b, "port", e.target.value)}
+                  />
+                </label>
+              </div>
+            ))}
 
           <h3>Serveur Hunyuan</h3>
           <div className="row server-controls">

@@ -75,8 +75,19 @@ export interface Gen3d {
 
 export interface HunyuanBackendConfig {
   dir: string;
+  python: string;
   port: number;
   modelPath: string;
+}
+
+export interface HunyuanEntryPatch {
+  dir?: string;
+  python?: string;
+  port?: number;
+  modelPath?: string;
+  subfolder?: string;
+  texgenModelPath?: string;
+  extraArgs?: string[];
 }
 
 export interface ConfigPublic {
@@ -105,4 +116,8 @@ export interface ConfigPatch {
   defaultBackend?: "v21" | "mv2";
   workspaceDir?: string;
   gen3d?: Partial<Gen3d>;
+  hunyuan?: {
+    v21?: HunyuanEntryPatch;
+    mv2?: HunyuanEntryPatch;
+  };
 }

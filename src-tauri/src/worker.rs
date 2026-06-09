@@ -116,11 +116,44 @@ impl WorkerClient {
         self.base_url.lock().clone()
     }
 
+    /// Path to the bundled frozen worker exe (packaged builds). The PyInstaller
+    /// one-folder bundle lands under `<resource_dir>/worker/worker.exe`.
+    fn frozen_worker() -> PathBuf {
+        config::resource_root()
+            .join("worker")
+            .join("worker.exe")
+    }
+
+    /// Dev fallback: the project `.venv` interpreter.
     fn venv_python() -> PathBuf {
-        config::ROOT
+        config::repo_root()
             .join(".venv")
             .join("Scripts")
             .join("python.exe")
+    }
+
+    /// Build the spawn command for the worker on `port`. Prefers the bundled
+    /// frozen exe (no Python needed on the target); falls back to the dev venv
+    /// running uvicorn from the repo root.
+    fn worker_command(port: u16) -> Command {
+        let port_s = port.to_string();
+        let frozen = Self::frozen_worker();
+        if frozen.is_file() {
+            let mut cmd = Command::new(frozen);
+            cmd.arg("--host").arg("127.0.0.1").arg("--port").arg(port_s);
+            cmd
+        } else {
+            let mut cmd = Command::new(Self::venv_python());
+            cmd.arg("-m")
+                .arg("uvicorn")
+                .arg("worker.main:app")
+                .arg("--host")
+                .arg("127.0.0.1")
+                .arg("--port")
+                .arg(port_s)
+                .current_dir(config::repo_root());
+            cmd
+        }
     }
 
     /// Spawn the sidecar (non-blocking spawn; then wait for /health up to ~60s).
@@ -145,17 +178,8 @@ impl WorkerClient {
             .open(&log_path)?;
         let log_err = log_file.try_clone()?;
 
-        let python = Self::venv_python();
-        let mut cmd = Command::new(python);
-        cmd.arg("-m")
-            .arg("uvicorn")
-            .arg("worker.main:app")
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(port.to_string())
-            .current_dir(&*config::ROOT)
-            .stdout(std::process::Stdio::from(log_file))
+        let mut cmd = Self::worker_command(port);
+        cmd.stdout(std::process::Stdio::from(log_file))
             .stderr(std::process::Stdio::from(log_err));
         #[cfg(windows)]
         {

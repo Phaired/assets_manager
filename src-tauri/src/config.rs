@@ -12,25 +12,78 @@ use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 
-/// Project root = parent of the cargo `src-tauri/` directory, matching the
-/// original Python `ROOT = parent of app/`. We resolve it from the compile-time
-/// manifest dir so the workspace/config/logs land in the same place as before.
-pub static ROOT: Lazy<PathBuf> = Lazy::new(|| {
+/// Runtime paths, resolved ONCE at startup (see `init_paths`, called from the
+/// Tauri `setup` hook). We split two roots that used to be the single compile-time
+/// `ROOT`:
+///   - `data`     : writable — config.json, workspace/, logs/. In a packaged build
+///                  this is the per-user app-data dir (e.g. %APPDATA%\<id>); in dev
+///                  it is the project root so the existing files keep working.
+///   - `resource` : read-only, bundled — the frozen Python worker. In a packaged
+///                  build this is Tauri's resource dir; in dev it is the project root.
+///
+/// Before `init_paths` runs (unit tests, any pre-setup call) we fall back to the
+/// project root derived from the compile-time manifest dir — identical to the old
+/// behaviour, so dev/test paths are unchanged.
+struct Paths {
+    data: PathBuf,
+    resource: PathBuf,
+}
+
+static PATHS: Lazy<once_cell::sync::OnceCell<Paths>> =
+    Lazy::new(once_cell::sync::OnceCell::new);
+
+/// Project root = parent of the cargo `src-tauri/` dir (compile-time manifest).
+/// Used as the dev/test fallback and for the dev `.venv` worker.
+pub fn repo_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or(manifest)
-});
-
-pub fn config_path() -> PathBuf {
-    ROOT.join("config.json")
 }
 
-/// Identical to the original Python `DEFAULTS`.
+/// Install the runtime roots. Idempotent: only the first call wins.
+pub fn init_paths(data: PathBuf, resource: PathBuf) {
+    let _ = PATHS.set(Paths { data, resource });
+}
+
+/// Writable root (config.json, workspace, logs). Falls back to the repo root.
+pub fn data_root() -> PathBuf {
+    PATHS.get().map(|p| p.data.clone()).unwrap_or_else(repo_root)
+}
+
+/// Read-only bundled-resource root (frozen worker). Falls back to the repo root.
+pub fn resource_root() -> PathBuf {
+    PATHS
+        .get()
+        .map(|p| p.resource.clone())
+        .unwrap_or_else(repo_root)
+}
+
+pub fn config_path() -> PathBuf {
+    data_root().join("config.json")
+}
+
+/// In dev we keep the original Hunyuan paths (this machine). In a packaged build
+/// they default to empty so the app invites the user to configure them in Settings
+/// (the supervisor surfaces a clear error) instead of pointing at a dev-only path.
+fn hunyuan_default(dir: &str, python: &str) -> (String, String) {
+    if cfg!(debug_assertions) {
+        (dir.to_string(), python.to_string())
+    } else {
+        (String::new(), String::new())
+    }
+}
+
+/// Identical to the original Python `DEFAULTS` (workspace/Hunyuan paths resolved
+/// at runtime — see `data_root` and `hunyuan_default`).
 pub fn defaults() -> Value {
+    let (v21_dir, v21_py) =
+        hunyuan_default("C:\\dev\\3dmodel\\Hunyuan3D-2.1", "C:\\dev\\3dmodel\\Hunyuan3D-2.1\\.venv\\Scripts\\python.exe");
+    let (mv2_dir, mv2_py) =
+        hunyuan_default("C:\\dev\\3dmodel\\Hunyuan3D-2", "C:\\dev\\3dmodel\\Hunyuan3D-2\\.venv\\Scripts\\python.exe");
     json!({
-        "workspace_dir": ROOT.join("workspace").to_string_lossy(),
+        "workspace_dir": data_root().join("workspace").to_string_lossy(),
         "openai_api_key": "",
         "openai_model": "gpt-image-2",
         "openai_quality": "medium",
@@ -51,8 +104,8 @@ pub fn defaults() -> Value {
         },
         "hunyuan": {
             "v21": {
-                "dir": "C:\\dev\\3dmodel\\Hunyuan3D-2.1",
-                "python": "C:\\dev\\3dmodel\\Hunyuan3D-2.1\\.venv\\Scripts\\python.exe",
+                "dir": v21_dir,
+                "python": v21_py,
                 "script": "api_server.py",
                 "host": "127.0.0.1",
                 "port": 8081,
@@ -61,8 +114,8 @@ pub fn defaults() -> Value {
                 "extra_args": ["--low_vram_mode", "--enable_flashvdm"]
             },
             "mv2": {
-                "dir": "C:\\dev\\3dmodel\\Hunyuan3D-2",
-                "python": "C:\\dev\\3dmodel\\Hunyuan3D-2\\.venv\\Scripts\\python.exe",
+                "dir": mv2_dir,
+                "python": mv2_py,
                 "script": "gradio_app.py",
                 "host": "127.0.0.1",
                 "port": 8080,
@@ -158,9 +211,9 @@ pub fn workspace_dir(config: &Value) -> AppResult<PathBuf> {
     Ok(path)
 }
 
-/// Logs directory under the project root, ensured to exist.
+/// Logs directory under the writable data root, ensured to exist.
 pub fn logs_dir() -> AppResult<PathBuf> {
-    let path = ROOT.join("logs");
+    let path = data_root().join("logs");
     std::fs::create_dir_all(&path)?;
     Ok(path)
 }

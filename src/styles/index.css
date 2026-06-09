@@ -320,6 +320,31 @@ select.input {
   padding-right: 28px;
 }
 
+/* Hunyuan backend config blocks (Settings) */
+.hun-block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--panel-2);
+}
+.hun-block > strong {
+  display: block;
+  margin-bottom: 6px;
+}
+.path-row {
+  gap: 6px;
+  align-items: center;
+}
+.path-row .input {
+  flex: 1;
+  min-width: 0;
+}
+.path-row .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
 .field-label {
   font-size: 11px;
   font-weight: 600;

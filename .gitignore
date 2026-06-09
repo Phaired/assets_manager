@@ -6,6 +6,9 @@ logs/
 __pycache__/
 *.pyc
 src-tauri/target/
+worker_dist/
+worker_build/
 config.json
 .env
 *.tmp
+*.log

@@ -74,6 +74,25 @@ fn command_for(backend: &str, cfg: &Value) -> AppResult<(Command, PathBuf)> {
     let get = |k: &str| h.get(k).and_then(|x| x.as_str()).unwrap_or("");
     let python = get("python");
     let script = get("script");
+
+    // Clear, actionable errors instead of an opaque OS spawn failure when the
+    // Hunyuan install has not been configured (Settings) or has moved.
+    if python.trim().is_empty() || get("dir").trim().is_empty() {
+        return Err(AppError::msg(format!(
+            "Hunyuan {backend} non configuré : renseigne le dossier et le python du serveur dans Réglages."
+        )));
+    }
+    if !PathBuf::from(python).is_file() {
+        return Err(AppError::msg(format!(
+            "Hunyuan {backend} introuvable : python « {python} » n'existe pas (vérifie le chemin dans Réglages)."
+        )));
+    }
+    if !PathBuf::from(get("dir")).is_dir() {
+        return Err(AppError::msg(format!(
+            "Hunyuan {backend} introuvable : dossier « {} » inexistant (vérifie le chemin dans Réglages).",
+            get("dir")
+        )));
+    }
     let host = h
         .get("host")
         .and_then(|x| x.as_str())

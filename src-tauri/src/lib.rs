@@ -15,6 +15,8 @@ mod worker;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tauri::Manager;
+
 use crate::config::Config;
 use crate::jobs::JobManager;
 use crate::store::Store;
@@ -37,15 +39,11 @@ pub fn run() {
         Arc::clone(&worker),
     );
 
-    // At startup: stale running/queued stages cannot survive a restart.
-    if let Err(e) = store.reset_stale_stages() {
-        eprintln!("reset_stale_stages: {e}");
-    }
-
     // Clones moved into setup / exit handlers.
     let worker_for_setup = Arc::clone(&worker);
     let supervisor_for_tick = Arc::clone(&supervisor);
     let jobs_for_setup = Arc::clone(&jobs);
+    let store_for_setup = Arc::clone(&store);
 
     let worker_for_exit = Arc::clone(&worker);
     let supervisor_for_exit = Arc::clone(&supervisor);
@@ -60,6 +58,33 @@ pub fn run() {
         .manage(Arc::clone(&jobs))
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // Resolve runtime roots BEFORE anything touches config/workspace/logs.
+            // - dev: keep the project root so existing config.json/workspace work.
+            // - packaged: writable data in the per-user app-data dir, bundled
+            //   resources (frozen worker) in Tauri's resource dir.
+            let resource = app
+                .path()
+                .resource_dir()
+                .unwrap_or_else(|_| config::repo_root());
+            let data = if cfg!(debug_assertions) {
+                config::repo_root()
+            } else {
+                app.path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| config::repo_root())
+            };
+            if let Err(e) = std::fs::create_dir_all(&data) {
+                eprintln!("create data dir {}: {e}", data.display());
+            }
+            config::init_paths(data, resource);
+
+            // Stale running/queued stages cannot survive a restart (now that the
+            // workspace path is resolved).
+            if let Err(e) = store_for_setup.reset_stale_stages() {
+                eprintln!("reset_stale_stages: {e}");
+            }
+
             // Wire AppHandle into the job manager so it can emit events.
             jobs_for_setup.set_app(handle.clone());
 
@@ -98,6 +123,7 @@ pub fn run() {
             commands::server_start,
             commands::server_stop,
             commands::asset_file_src,
+            commands::save_asset_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

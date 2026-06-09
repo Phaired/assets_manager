@@ -19,7 +19,43 @@ dépendances Python (`worker/requirements.txt`) et JS (`pnpm install`), puis ouv
 
 Renseigne ta clé OpenAI dans **Réglages** (ou via `$OPENAI_API_KEY` / `.env`).
 
-Pour un exécutable autonome (installeur) : `pnpm tauri build`.
+## Distribution (installeur autonome, sans Python côté utilisateur)
+
+L'installeur **embarque le worker Python gelé** : le PC cible n'a besoin ni de
+Python, ni de venv, ni de `run.bat`. Deux étapes :
+
+```bat
+build-worker.bat        REM gèle le worker -> worker_dist\worker\worker.exe (PyInstaller)
+pnpm tauri build        REM construit l'app + embarque worker_dist\worker comme ressource
+```
+
+`build-worker.bat` doit être relancé quand le code du `worker/` change. L'app
+installée résout ses chemins au runtime :
+
+- **données inscriptibles** (`config.json`, `workspace/`, `logs/`) → dossier
+  utilisateur `%APPDATA%\com.assetsgen.app\` (et non le dossier d'install).
+- **worker gelé** → ressources de l'app, à côté de l'exécutable.
+
+En dev (`pnpm tauri dev`), rien ne change : `config.json`/`workspace`/`logs`
+restent dans le repo et le worker tourne depuis `.venv` (fallback automatique si
+le worker gelé est absent).
+
+> ⚠️ Le `config.json` du repo (qui peut contenir ta clé OpenAI) n'est **jamais**
+> embarqué : il est git-ignoré et l'app installée part d'une config propre.
+
+## Prérequis Hunyuan (génération 3D locale)
+
+Les serveurs Hunyuan3D sont des projets **PyTorch + CUDA externes** (multi-Go) —
+ils ne sont pas embarqués. Sur la machine de génération :
+
+1. Cloner les repos Hunyuan3D (2.1 et/ou 2mv) et créer leur venv respectif.
+2. Dans **Réglages → Backends 3D (Hunyuan)**, pointer chaque backend vers son
+   **dossier de repo** et le **python de son venv** (boutons *Parcourir*), régler
+   le port.
+3. Démarrer le serveur depuis **Réglages → Serveur Hunyuan**.
+
+Si un chemin manque ou est invalide, l'app affiche un message clair plutôt que
+d'échouer silencieusement.
 
 ## Architecture
 

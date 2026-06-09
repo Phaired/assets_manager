@@ -228,6 +228,7 @@ impl Gen3d {
 #[serde(rename_all = "camelCase")]
 pub struct HunyuanEntryPublic {
     pub dir: String,
+    pub python: String,
     pub port: i64,
     pub model_path: String,
 }
@@ -289,6 +290,7 @@ fn hunyuan_entry(hun: &Value, key: &str) -> HunyuanEntryPublic {
     let e = hun.get(key).cloned().unwrap_or(Value::Null);
     HunyuanEntryPublic {
         dir: str_field(&e, "dir"),
+        python: str_field(&e, "python"),
         port: int_field(&e, "port", 0),
         model_path: str_field(&e, "model_path"),
     }
@@ -309,6 +311,27 @@ pub struct Gen3dPatch {
     pub face_count_v21: Option<i64>,
 }
 
+/// Patch for one Hunyuan backend entry. Every field optional so the UI can save
+/// just the paths the user picks. Keys map to the snake_case on-disk config.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HunyuanEntryPatch {
+    pub dir: Option<String>,
+    pub python: Option<String>,
+    pub port: Option<i64>,
+    pub model_path: Option<String>,
+    pub subfolder: Option<String>,
+    pub texgen_model_path: Option<String>,
+    pub extra_args: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HunyuanPatch {
+    pub v21: Option<HunyuanEntryPatch>,
+    pub mv2: Option<HunyuanEntryPatch>,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigPatch {
@@ -321,6 +344,7 @@ pub struct ConfigPatch {
     pub default_backend: Option<String>,
     pub workspace_dir: Option<String>,
     pub gen3d: Option<Gen3dPatch>,
+    pub hunyuan: Option<HunyuanPatch>,
 }
 
 impl ConfigPatch {
@@ -380,8 +404,48 @@ impl ConfigPatch {
             }
             obj.insert("gen3d".into(), Value::Object(go));
         }
+        if let Some(h) = &self.hunyuan {
+            let mut ho = serde_json::Map::new();
+            if let Some(e) = &h.v21 {
+                ho.insert("v21".into(), hunyuan_entry_override(e));
+            }
+            if let Some(e) = &h.mv2 {
+                ho.insert("mv2".into(), hunyuan_entry_override(e));
+            }
+            obj.insert("hunyuan".into(), Value::Object(ho));
+        }
         Value::Object(obj)
     }
+}
+
+/// Snake_case override object for one Hunyuan entry (only the set fields).
+fn hunyuan_entry_override(e: &HunyuanEntryPatch) -> Value {
+    let mut o = serde_json::Map::new();
+    if let Some(v) = &e.dir {
+        o.insert("dir".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &e.python {
+        o.insert("python".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = e.port {
+        o.insert("port".into(), Value::from(v));
+    }
+    if let Some(v) = &e.model_path {
+        o.insert("model_path".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &e.subfolder {
+        o.insert("subfolder".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &e.texgen_model_path {
+        o.insert("texgen_model_path".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &e.extra_args {
+        o.insert(
+            "extra_args".into(),
+            Value::Array(v.iter().map(|s| Value::String(s.clone())).collect()),
+        );
+    }
+    Value::Object(o)
 }
 
 // --- small helpers ------------------------------------------------------

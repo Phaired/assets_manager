@@ -17,7 +17,8 @@ import {
   useResetAsset,
   useUploadSource,
 } from "../lib/queries";
-import { assetFileUrl } from "../lib/api";
+import { save } from "@tauri-apps/plugin-dialog";
+import { assetFileUrl, saveAssetFile } from "../lib/api";
 import { StageCard } from "./StageCard";
 import { MultiviewGallery } from "./MultiviewGallery";
 import { Viewer3D } from "./Viewer3D";
@@ -83,6 +84,19 @@ export function AssetDetail({
       active = false;
     };
   }, [project, assetId, modelReady, modelVer]);
+
+  // Real "Save As": native dialog -> Rust-side file copy. An <a download> to the
+  // asset protocol does not save in WebView2 (it opened the .glb in Notepad).
+  async function downloadGlb() {
+    if (!project || !assetId || !asset) return;
+    const dest = await save({
+      defaultPath: `${asset.id}.glb`,
+      filters: [{ name: "glTF binaire", extensions: ["glb"] }],
+    });
+    if (typeof dest === "string") {
+      await saveAssetFile(project, assetId, "model.glb", dest);
+    }
+  }
 
   if (!asset || !project || !assetId) {
     return (
@@ -218,15 +232,13 @@ export function AssetDetail({
             >
               <Maximize2 size={14} /> Agrandir dans le visualiseur
             </button>
-            {modelUrl && (
-              <a
-                className="btn ghost sm btnlink"
-                href={modelUrl}
-                download={`${asset.id}.glb`}
-              >
-                <Download size={14} /> Télécharger .glb
-              </a>
-            )}
+            <button
+              className="btn ghost sm"
+              onClick={downloadGlb}
+              disabled={!modelReady}
+            >
+              <Download size={14} /> Télécharger .glb
+            </button>
           </div>
         </section>
       )}
