@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.venv/
+workspace/
+logs/
+__pycache__/
+*.pyc
+src-tauri/target/
+config.json
+.env
+*.tmp

@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+httpx
+python-multipart
+gradio_client
+trimesh
+pymeshlab
+numpy
+pillow
