@@ -49,6 +49,8 @@ fn pick_free_port() -> AppResult<u16> {
 struct MultiviewReq<'a> {
     name: &'a str,
     description: &'a str,
+    /// Project-level style appended to the image prompt (empty when unset).
+    style: &'a str,
     output_dir: String,
     api_key: &'a str,
     model: &'a str,
@@ -78,6 +80,21 @@ struct Gen3dReq<'a> {
 #[serde(rename_all = "camelCase")]
 struct ExportReq {
     glb: String,
+    dest: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditImageReq<'a> {
+    image_path: &'a str,
+    prompt: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mask_path: Option<String>,
+    model: &'a str,
+    size: &'a str,
+    quality: &'a str,
+    api_key: &'a str,
+    timeout: i64,
     dest: String,
 }
 
@@ -285,6 +302,7 @@ impl WorkerClient {
         &self,
         name: &str,
         description: &str,
+        style: &str,
         output_dir: &str,
         api_key: &str,
         model: &str,
@@ -295,6 +313,7 @@ impl WorkerClient {
         let body = MultiviewReq {
             name,
             description,
+            style,
             output_dir: output_dir.to_string(),
             api_key,
             model,
@@ -327,6 +346,34 @@ impl WorkerClient {
             view_dir: view_dir.map(|s| s.to_string()),
         };
         self.post_json(&self.long, "/gen3d", &body, Duration::from_secs(3600))
+    }
+
+    /// POST /edit_image (~300s). OpenAI image edit (prompt + optional mask).
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_image(
+        &self,
+        image_path: &str,
+        prompt: &str,
+        mask_path: Option<&str>,
+        model: &str,
+        size: &str,
+        quality: &str,
+        api_key: &str,
+        timeout: i64,
+        dest: &str,
+    ) -> AppResult<Value> {
+        let body = EditImageReq {
+            image_path,
+            prompt,
+            mask_path: mask_path.map(|s| s.to_string()),
+            model,
+            size,
+            quality,
+            api_key,
+            timeout,
+            dest: dest.to_string(),
+        };
+        self.post_json(&self.long, "/edit_image", &body, Duration::from_secs(300))
     }
 
     /// POST /export.

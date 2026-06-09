@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { X, Upload } from "lucide-react";
 
-import { Viewer3D } from "./Viewer3D";
+import { LazyViewer3D } from "./LazyViewer3D";
 import { Modal } from "./Modal";
 
 export function ViewerDialog({
@@ -76,7 +76,7 @@ export function ViewerDialog({
         />
       </div>
 
-      <Viewer3D src={src} height={480} />
+      <LazyViewer3D src={src} height={480} />
     </Modal>
   );
 }

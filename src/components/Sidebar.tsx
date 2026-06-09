@@ -1,10 +1,69 @@
-import { useState } from "react";
-import { Plus, FolderPlus, Loader2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Plus, FolderPlus, Loader2, Check } from "lucide-react";
 
 import type { ProjectBundle, StageStatus } from "../lib/types";
 import { STAGES } from "../lib/constants";
-import { useCreateProject } from "../lib/queries";
+import { useCreateProject, useSetProjectStyle } from "../lib/queries";
 import { NewAssetForm } from "./NewAssetForm";
+
+/** Free-text style for the whole project — injected into every asset's image
+ *  prompt. Saved on blur (or Ctrl/Cmd+Enter). */
+function ProjectStyleField({
+  project,
+  style,
+}: {
+  project: string;
+  style: string;
+}) {
+  const setStyle = useSetProjectStyle(project);
+  const [value, setValue] = useState(style);
+  const [saved, setSaved] = useState(false);
+
+  // Re-sync when switching project or when the persisted value changes.
+  useEffect(() => {
+    setValue(style);
+    setSaved(false);
+  }, [project, style]);
+
+  function commit() {
+    if (value === style) return;
+    setStyle.mutate(value, {
+      onSuccess: () => {
+        setSaved(true);
+        window.setTimeout(() => setSaved(false), 1500);
+      },
+    });
+  }
+
+  return (
+    <div className="project-style">
+      <label className="field-label" htmlFor="project-style">
+        Style du projet
+        {setStyle.isPending && <Loader2 size={12} className="spin" />}
+        {saved && !setStyle.isPending && (
+          <span className="saved-hint">
+            <Check size={12} /> enregistré
+          </span>
+        )}
+      </label>
+      <textarea
+        id="project-style"
+        className="input"
+        rows={2}
+        placeholder="ex. low-poly, couleurs vives, matériaux mats…"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          }
+        }}
+      />
+    </div>
+  );
+}
 
 function stageStatus(
   bundle: ProjectBundle | null,
@@ -110,6 +169,10 @@ export function Sidebar({
               )}
             </button>
           </form>
+        )}
+
+        {project && bundle && (
+          <ProjectStyleField project={project} style={bundle.project.style} />
         )}
       </div>
 

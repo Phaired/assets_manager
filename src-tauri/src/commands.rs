@@ -13,8 +13,9 @@ use crate::events;
 use crate::jobs::JobManager;
 use crate::store::Store;
 use crate::supervisor::Supervisor;
+use crate::worker::WorkerClient;
 use crate::types::{
-    Asset, ConfigPatch, ConfigPublic, JobCurrent, Project, ProjectBundle, ProjectState,
+    Asset, ConfigPatch, ConfigPublic, Gen3dPatch, JobCurrent, Project, ProjectBundle, ProjectState,
     ServerStatus,
 };
 
@@ -52,6 +53,18 @@ pub fn get_project(
         state: ProjectState::from_disk(&state_v),
         jobs: jobs.snapshot(),
     })
+}
+
+#[tauri::command]
+pub fn set_project_style(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    style: String,
+) -> CmdResult<()> {
+    store.set_project_style(&project, &style)?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
 }
 
 // --- assets -------------------------------------------------------------
@@ -123,6 +136,24 @@ pub fn upload_source(
     })
 }
 
+/// Set or clear the per-asset 3D generation override (polygon count, steps,
+/// texture…). An empty patch clears the override and reverts to global defaults.
+#[tauri::command]
+pub fn set_asset_gen3d(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    gen3d: Gen3dPatch,
+) -> CmdResult<()> {
+    // Ensure the asset exists, then persist the snake_case override.
+    let _ = store.get_asset(&project, &asset_id)?;
+    let over = serde_json::Value::Object(gen3d.to_snake_object());
+    store.set_asset_gen3d(&project, &asset_id, over)?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn reset_asset(
     app: tauri::AppHandle,
@@ -133,6 +164,115 @@ pub fn reset_asset(
     store.reset_asset(&project, &asset_id)?;
     events::emit_project_changed(&app, &project);
     Ok(())
+}
+
+/// Edit the asset's source image via OpenAI (prompt + optional mask) and
+/// overwrite source.png. Marks the source `manual` and resets the model3d/export
+/// stages to `pending` so the user can rebuild the 3D from the edited image.
+#[tauri::command]
+pub fn edit_image(
+    app: tauri::AppHandle,
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    worker: State<'_, Arc<WorkerClient>>,
+    project: String,
+    asset_id: String,
+    prompt: String,
+    mask_bytes: Option<Vec<u8>>,
+) -> CmdResult<UploadResult> {
+    let _ = store.get_asset(&project, &asset_id)?;
+    if prompt.trim().is_empty() {
+        return Err("le prompt d'édition est vide".into());
+    }
+
+    let cfg = config.load();
+    let api_key = crate::config::openai_key(&cfg);
+    if api_key.is_empty() {
+        return Err("OPENAI_API_KEY absent (Réglages ou .env)".into());
+    }
+
+    // Resolve the image to edit: source.png if present, else the multiview front.
+    let source = store.source_image_path(&project, &asset_id)?;
+    let base = if source.is_file() {
+        source.clone()
+    } else {
+        let front = store
+            .multiview_dir(&project, &asset_id)?
+            .join("front.png");
+        if front.is_file() {
+            front
+        } else {
+            return Err("aucune image à éditer : génère d'abord l'image source".into());
+        }
+    };
+
+    // Budget gate (same accounting as the multiview stage).
+    let state = store.load_state(&project)?;
+    let current_spend = state
+        .get("estimated_spend_usd")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
+    let est_cost = cfg
+        .get("estimated_cost_per_image")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.063);
+    let budget = cfg.get("budget_usd").and_then(|x| x.as_f64()).unwrap_or(5.0);
+    if current_spend + est_cost > budget + 1e-9 {
+        return Err(format!(
+            "budget atteint: projeté ${:.3} > ${:.2}",
+            current_spend + est_cost,
+            budget
+        ));
+    }
+
+    // Persist the optional mask to a temp file alongside the asset.
+    let mask_path = if let Some(bytes) = mask_bytes.filter(|b| !b.is_empty()) {
+        let p = store.asset_dir(&project, &asset_id)?.join(".edit_mask.png");
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).map_err(AppError::from)?;
+        }
+        std::fs::write(&p, &bytes)
+            .map_err(|e| AppError::msg(format!("écriture du masque: {e}")))?;
+        Some(p)
+    } else {
+        None
+    };
+
+    let model = cfg.get("openai_model").and_then(|x| x.as_str()).unwrap_or("");
+    let quality = cfg
+        .get("openai_quality")
+        .and_then(|x| x.as_str())
+        .unwrap_or("medium");
+    let timeout = cfg.get("openai_timeout").and_then(|x| x.as_i64()).unwrap_or(300);
+
+    let result = worker.edit_image(
+        &base.to_string_lossy(),
+        prompt.trim(),
+        mask_path.as_ref().map(|p| p.to_string_lossy().to_string()).as_deref(),
+        model,
+        "", // size omitted for edits (API matches the input image; "auto" is invalid here)
+        quality,
+        &api_key,
+        timeout,
+        &source.to_string_lossy(),
+    );
+
+    // Always clean up the temp mask.
+    if let Some(p) = &mask_path {
+        let _ = std::fs::remove_file(p);
+    }
+    result?;
+
+    // Account spend, flip to a manual source, invalidate downstream stages.
+    let _ = store.add_spend(&project, est_cost)?;
+    store.set_asset_source(&project, &asset_id, "manual")?;
+    store.update_stage(&project, &asset_id, "model3d", "pending", None, None)?;
+    store.update_stage(&project, &asset_id, "export", "pending", None, None)?;
+
+    events::emit_project_changed(&app, &project);
+    Ok(UploadResult {
+        source: "manual".to_string(),
+    })
 }
 
 // --- generation ---------------------------------------------------------

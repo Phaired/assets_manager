@@ -66,6 +66,7 @@ class Gen3d(BaseModel):
 class MultiviewRequest(BaseModel):
     name: str
     description: str = ""
+    style: str = ""
     outputDir: str
     apiKey: str
     model: str
@@ -91,6 +92,18 @@ class ExportRequest(BaseModel):
     dest: str
 
 
+class EditImageRequest(BaseModel):
+    imagePath: str
+    prompt: str
+    maskPath: Optional[str] = None
+    model: str
+    size: str = "auto"
+    quality: str = "medium"
+    apiKey: str
+    timeout: int = 300
+    dest: str
+
+
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
@@ -107,6 +120,7 @@ def multiview(req: MultiviewRequest) -> dict:
         meta = stages.run_multiview(
             name=req.name,
             description=req.description,
+            style=req.style,
             output_dir=Path(req.outputDir),
             api_key=req.apiKey,
             model=req.model,
@@ -151,6 +165,33 @@ def gen3d(req: Gen3dRequest) -> dict:
         raise HTTPException(status_code=502, detail=_msg(error))
 
     return {**meta, "backend": req.backend, "seed": seed, "output": str(dest)}
+
+
+@app.post("/edit_image")
+def edit_image(req: EditImageRequest) -> dict:
+    """OpenAI image edit (prompt + optional mask) -> overwrite the dest PNG."""
+    image = Path(req.imagePath)
+    if not image.is_file():
+        raise HTTPException(status_code=422, detail=f"image introuvable: {image}")
+    if req.maskPath and not Path(req.maskPath).is_file():
+        raise HTTPException(status_code=422, detail=f"masque introuvable: {req.maskPath}")
+    try:
+        out = stages.edit_image(
+            api_key=req.apiKey,
+            image_path=image,
+            prompt=req.prompt,
+            model=req.model,
+            size=req.size,
+            quality=req.quality,
+            timeout=req.timeout,
+            mask_path=Path(req.maskPath) if req.maskPath else None,
+        )
+    except Exception as error:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=_msg(error))
+    dest = Path(req.dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(out)
+    return {"output": str(dest)}
 
 
 @app.post("/export")

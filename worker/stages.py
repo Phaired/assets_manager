@@ -27,6 +27,7 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 
 API_URL = "https://api.openai.com/v1/images/generations"
+EDIT_URL = "https://api.openai.com/v1/images/edits"
 VIEW_FILES = ("front.png", "back.png", "left.png", "right.png")
 
 
@@ -78,6 +79,44 @@ def request_image(api_key: str, prompt: str, model: str, quality: str, timeout: 
     raise RuntimeError("OpenAI response did not contain b64_json or url")
 
 
+def edit_image(api_key: str, image_path: Path, prompt: str, model: str, size: str,
+               quality: str, timeout: int, mask_path: "Path | None" = None) -> bytes:
+    """POST /v1/images/edits (multipart). Returns the edited PNG bytes.
+
+    When ``mask_path`` is given, only its transparent pixels are edited (OpenAI
+    inpainting semantics). Used to retouch an asset's source image precisely
+    (e.g. recolor one object) before 3D reconstruction.
+    """
+    import httpx
+
+    files = {"image": ("image.png", Path(image_path).read_bytes(), "image/png")}
+    if mask_path is not None:
+        files["mask"] = ("mask.png", Path(mask_path).read_bytes(), "image/png")
+    data = {
+        "model": model,
+        "prompt": prompt,
+        "n": "1",
+        "quality": quality,
+    }
+    # /images/edits does NOT accept size="auto" (unlike generations). Only send an
+    # explicit resolution; otherwise omit it so the API matches the input image.
+    if size and size != "auto":
+        data["size"] = size
+    headers = {"Authorization": f"Bearer {api_key}"}
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(EDIT_URL, headers=headers, data=data, files=files)
+    if response.status_code != 200:
+        raise RuntimeError(f"/images/edits HTTP {response.status_code}: {response.text[:500]}")
+    result = response.json()
+    image = result["data"][0]
+    if image.get("b64_json"):
+        return base64.b64decode(image["b64_json"])
+    if image.get("url"):
+        with httpx.Client(timeout=timeout) as client:
+            return client.get(image["url"]).content
+    raise RuntimeError("OpenAI edit response did not contain b64_json or url")
+
+
 def pad_square(image, background=(235, 237, 240)):
     from PIL import Image
 
@@ -108,7 +147,7 @@ def split_sheet(sheet_bytes: bytes, output_dir: Path) -> None:
 
 
 def run_multiview(*, name: str, description: str, output_dir: Path, api_key: str,
-                  model: str, quality: str, timeout: int) -> dict:
+                  model: str, quality: str, timeout: int, style: str = "") -> dict:
     """Generate and split the multiview sheet.
 
     Budget is enforced in Rust BEFORE this is called — the worker just generates.
@@ -118,7 +157,7 @@ def run_multiview(*, name: str, description: str, output_dir: Path, api_key: str
     it. The original returned ``est_cost`` as ``cost`` — Rust supplies that via
     config, so we surface a deterministic ``files`` list.
     """
-    prompt = prompt_for(name, description)
+    prompt = prompt_for(name, description, extra=style)
     image_bytes = request_image(api_key, prompt, model, quality, timeout)
     split_sheet(image_bytes, output_dir)
     return {"model": model, "quality": quality, "files": ["sheet.png", *VIEW_FILES]}

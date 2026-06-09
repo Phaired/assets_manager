@@ -10,7 +10,6 @@ import {
 import { Canvas } from "@react-three/fiber";
 import {
   OrbitControls,
-  Environment,
   Grid,
   Center,
   Bounds,
@@ -182,7 +181,10 @@ export function Viewer3D({
         gl={{ antialias: true, preserveDrawingBuffer: true }}
       >
         <color attach="background" args={["#15171d"]} />
-        <hemisphereLight intensity={0.5} groundColor="#0b0d12" />
+        {/* Local lights only — no <Environment preset> (it fetches a remote HDR,
+            which stalls offline / in the packaged app). */}
+        <ambientLight intensity={0.45} />
+        <hemisphereLight intensity={0.6} groundColor="#0b0d12" />
         <directionalLight
           position={[5, 8, 5]}
           intensity={1.1}
@@ -218,7 +220,6 @@ export function Viewer3D({
               </div>
             </Html>
           )}
-          <Environment preset="city" />
         </Suspense>
 
         {grid && (

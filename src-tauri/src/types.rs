@@ -21,6 +21,10 @@ pub struct Asset {
     pub backend: String,
     pub source: String,
     pub created_at: String,
+    /// Per-asset 3D generation override (partial gen3d, camelCase). Absent when
+    /// the asset uses the global defaults. Merged over config `gen3d` at run time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gen3d: Option<Value>,
 }
 
 impl Asset {
@@ -50,6 +54,9 @@ impl Asset {
                 .unwrap_or("openai")
                 .to_string(),
             created_at: str_field(v, "created_at"),
+            // On disk gen3d is stored snake_case; expose it to the bridge as the
+            // camelCase the UI uses.
+            gen3d: v.get("gen3d").map(gen3d_disk_to_camel),
         }
     }
 }
@@ -93,6 +100,9 @@ impl StageState {
 pub struct Project {
     pub name: String,
     pub created_at: String,
+    /// Free-text style applied to every asset's image prompt (e.g. "low-poly,
+    /// flat colors"). Empty by default. Persisted in project.json.
+    pub style: String,
     pub assets: Vec<Asset>,
 }
 
@@ -101,6 +111,7 @@ impl Project {
         Project {
             name: str_field(v, "name"),
             created_at: str_field(v, "created_at"),
+            style: str_field(v, "style"),
             assets: v
                 .get("assets")
                 .and_then(|a| a.as_array())
@@ -311,6 +322,39 @@ pub struct Gen3dPatch {
     pub face_count_v21: Option<i64>,
 }
 
+impl Gen3dPatch {
+    /// The set fields as a snake_case JSON object (the on-disk gen3d shape).
+    /// Used both for the config override and the per-asset override.
+    pub fn to_snake_object(&self) -> serde_json::Map<String, Value> {
+        let mut go = serde_json::Map::new();
+        if let Some(x) = self.target_face_num {
+            go.insert("target_face_num".into(), Value::from(x));
+        }
+        if let Some(x) = self.octree_resolution {
+            go.insert("octree_resolution".into(), Value::from(x));
+        }
+        if let Some(x) = self.num_chunks {
+            go.insert("num_chunks".into(), Value::from(x));
+        }
+        if let Some(x) = self.guidance_scale {
+            go.insert("guidance_scale".into(), Value::from(x));
+        }
+        if let Some(x) = self.texture {
+            go.insert("texture".into(), Value::from(x));
+        }
+        if let Some(x) = self.steps_v21 {
+            go.insert("steps_v21".into(), Value::from(x));
+        }
+        if let Some(x) = self.steps_mv2 {
+            go.insert("steps_mv2".into(), Value::from(x));
+        }
+        if let Some(x) = self.face_count_v21 {
+            go.insert("face_count_v21".into(), Value::from(x));
+        }
+        go
+    }
+}
+
 /// Patch for one Hunyuan backend entry. Every field optional so the UI can save
 /// just the paths the user picks. Keys map to the snake_case on-disk config.
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -377,32 +421,7 @@ impl ConfigPatch {
             obj.insert("workspace_dir".into(), Value::String(v.clone()));
         }
         if let Some(g) = &self.gen3d {
-            let mut go = serde_json::Map::new();
-            if let Some(x) = g.target_face_num {
-                go.insert("target_face_num".into(), Value::from(x));
-            }
-            if let Some(x) = g.octree_resolution {
-                go.insert("octree_resolution".into(), Value::from(x));
-            }
-            if let Some(x) = g.num_chunks {
-                go.insert("num_chunks".into(), Value::from(x));
-            }
-            if let Some(x) = g.guidance_scale {
-                go.insert("guidance_scale".into(), Value::from(x));
-            }
-            if let Some(x) = g.texture {
-                go.insert("texture".into(), Value::from(x));
-            }
-            if let Some(x) = g.steps_v21 {
-                go.insert("steps_v21".into(), Value::from(x));
-            }
-            if let Some(x) = g.steps_mv2 {
-                go.insert("steps_mv2".into(), Value::from(x));
-            }
-            if let Some(x) = g.face_count_v21 {
-                go.insert("face_count_v21".into(), Value::from(x));
-            }
-            obj.insert("gen3d".into(), Value::Object(go));
+            obj.insert("gen3d".into(), Value::Object(g.to_snake_object()));
         }
         if let Some(h) = &self.hunyuan {
             let mut ho = serde_json::Map::new();
@@ -455,6 +474,29 @@ fn str_field(v: &Value, key: &str) -> String {
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+/// Map the 8 known snake_case `gen3d` keys to their camelCase bridge names so the
+/// per-asset override (stored snake_case on disk, like the global config) reaches
+/// the UI in the same shape it sends back.
+fn gen3d_disk_to_camel(v: &Value) -> Value {
+    const KEYS: [(&str, &str); 8] = [
+        ("target_face_num", "targetFaceNum"),
+        ("octree_resolution", "octreeResolution"),
+        ("num_chunks", "numChunks"),
+        ("guidance_scale", "guidanceScale"),
+        ("texture", "texture"),
+        ("steps_v21", "stepsV21"),
+        ("steps_mv2", "stepsMv2"),
+        ("face_count_v21", "faceCountV21"),
+    ];
+    let mut out = serde_json::Map::new();
+    for (snake, camel) in KEYS {
+        if let Some(x) = v.get(snake) {
+            out.insert(camel.to_string(), x.clone());
+        }
+    }
+    Value::Object(out)
 }
 
 fn int_field(v: &Value, key: &str, default: i64) -> i64 {

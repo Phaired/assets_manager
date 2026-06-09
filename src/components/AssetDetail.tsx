@@ -7,6 +7,7 @@ import {
   Download,
   Maximize2,
   Loader2,
+  Paintbrush,
 } from "lucide-react";
 
 import type { ProjectBundle, StageKey, StageState } from "../lib/types";
@@ -21,7 +22,9 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { assetFileUrl, saveAssetFile } from "../lib/api";
 import { StageCard } from "./StageCard";
 import { MultiviewGallery } from "./MultiviewGallery";
-import { Viewer3D } from "./Viewer3D";
+import { LazyViewer3D } from "./LazyViewer3D";
+import { Gen3dPanel } from "./Gen3dPanel";
+import { ImageEditDialog } from "./ImageEditDialog";
 
 export function AssetDetail({
   project,
@@ -43,6 +46,7 @@ export function AssetDetail({
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [modelUrl, setModelUrl] = useState<string | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
 
   const asset = useMemo(
     () => bundle?.project.assets.find((a) => a.id === assetId) ?? null,
@@ -174,6 +178,17 @@ export function AssetDetail({
         />
 
         <button
+          className="btn ghost sm"
+          onClick={() => setEditOpen(true)}
+          disabled={
+            asset.source !== "manual" && multiviewState?.status !== "done"
+          }
+          title="Modifier l'image source via OpenAI (couleur, détails…)"
+        >
+          <Paintbrush size={14} /> Modifier l'image
+        </button>
+
+        <button
           className="btn primary sm"
           onClick={() => runStages(ALL_STAGES)}
           disabled={generate.isPending}
@@ -209,6 +224,8 @@ export function AssetDetail({
         ))}
       </div>
 
+      <Gen3dPanel project={project} asset={asset} />
+
       {mvDone && (
         <section className="detail-section">
           <h3 className="section-title">Multivue</h3>
@@ -223,7 +240,7 @@ export function AssetDetail({
       {modelReady && (
         <section className="detail-section">
           <h3 className="section-title">Modèle 3D</h3>
-          <Viewer3D src={modelUrl} height={420} />
+          <LazyViewer3D src={modelUrl} height={420} />
           <div className="row viewer-actions">
             <button
               className="btn ghost sm"
@@ -247,6 +264,14 @@ export function AssetDetail({
         <p className="muted export-line">
           OBJ exporté : <code>{exportOutput}</code>
         </p>
+      )}
+
+      {editOpen && (
+        <ImageEditDialog
+          project={project}
+          assetId={assetId}
+          onClose={() => setEditOpen(false)}
+        />
       )}
     </div>
   );

@@ -9,6 +9,7 @@ import type {
   Backend,
   ConfigPatch,
   ConfigPublic,
+  Gen3d,
   JobCurrent,
   JobSnapshot,
   Project,
@@ -29,6 +30,10 @@ export function createProject(name: string): Promise<Project> {
 
 export function getProject(name: string): Promise<ProjectBundle> {
   return invoke<ProjectBundle>("get_project", { name });
+}
+
+export function setProjectStyle(project: string, style: string): Promise<void> {
+  return invoke<void>("set_project_style", { project, style });
 }
 
 export function createAsset(args: {
@@ -59,6 +64,31 @@ export function uploadSource(
 
 export function resetAsset(project: string, assetId: string): Promise<void> {
   return invoke<void>("reset_asset", { project, assetId });
+}
+
+/** Set (or clear, when `gen3d` is empty) the per-asset 3D generation override. */
+export function setAssetGen3d(
+  project: string,
+  assetId: string,
+  gen3d: Partial<Gen3d>,
+): Promise<void> {
+  return invoke<void>("set_asset_gen3d", { project, assetId, gen3d });
+}
+
+/** Edit the asset's source image via OpenAI. `maskBytes` (optional) restricts the
+ *  edit to the painted (transparent) region. Overwrites source.png. */
+export function editImage(
+  project: string,
+  assetId: string,
+  prompt: string,
+  maskBytes: number[] | null,
+): Promise<{ source: "manual" }> {
+  return invoke<{ source: "manual" }>("edit_image", {
+    project,
+    assetId,
+    prompt,
+    maskBytes,
+  });
 }
 
 export function generate(

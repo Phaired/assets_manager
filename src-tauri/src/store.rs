@@ -141,7 +141,7 @@ impl Store {
         if path.is_file() {
             return Ok(Self::read_json(&path, json!({})));
         }
-        let data = json!({"name": name, "created_at": now(), "assets": []});
+        let data = json!({"name": name, "created_at": now(), "style": "", "assets": []});
         Self::write_json(&path, &data)?;
         Self::write_json(
             &self.project_dir(&name)?.join("state.json"),
@@ -246,6 +246,66 @@ impl Store {
             let _ = std::fs::remove_dir_all(&adir);
         }
         Ok(())
+    }
+
+    /// Read the project's free-text style (empty if unset).
+    pub fn project_style(&self, project: &str) -> AppResult<String> {
+        let data = self.get_project(project)?;
+        Ok(data
+            .get("style")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string())
+    }
+
+    /// Persist the project's free-text style into project.json.
+    pub fn set_project_style(&self, project: &str, style: &str) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let mut data = self.get_project(project)?;
+        data.as_object_mut()
+            .ok_or_else(|| AppError::msg("project.json corrompu"))?
+            .insert("style".into(), Value::String(style.to_string()));
+        self.save_project(project, &data)
+    }
+
+    /// Set (or clear, when `override_obj` is empty) the per-asset gen3d override
+    /// stored on the asset in project.json. Keys are snake_case to merge cleanly
+    /// over the global `gen3d` config at run time.
+    pub fn set_asset_gen3d(
+        &self,
+        project: &str,
+        asset_id: &str,
+        override_obj: Value,
+    ) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let mut data = self.get_project(project)?;
+        let mut found = false;
+        if let Some(arr) = data.get_mut("assets").and_then(|a| a.as_array_mut()) {
+            for asset in arr.iter_mut() {
+                if asset.get("id").and_then(|x| x.as_str()) == Some(asset_id) {
+                    if let Some(o) = asset.as_object_mut() {
+                        let empty = override_obj
+                            .as_object()
+                            .map(|m| m.is_empty())
+                            .unwrap_or(true);
+                        if empty {
+                            o.remove("gen3d");
+                        } else {
+                            o.insert("gen3d".into(), override_obj.clone());
+                        }
+                    }
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            return Err(AppError::AssetNotFound {
+                project: project.to_string(),
+                asset_id: asset_id.to_string(),
+            });
+        }
+        self.save_project(project, &data)
     }
 
     pub fn set_asset_source(&self, project: &str, asset_id: &str, source: &str) -> AppResult<()> {

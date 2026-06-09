@@ -13,6 +13,7 @@ import type {
   Backend,
   ConfigPatch,
   ConfigPublic,
+  Gen3d,
   ProjectBundle,
   ServerStatus,
   StageKey,
@@ -66,6 +67,17 @@ export function useCreateProject() {
   });
 }
 
+export function useSetProjectStyle(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (style: string) =>
+      api.setProjectStyle(project as string, style),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
 export function useCreateAsset(project: string | null) {
   const qc = useQueryClient();
   return useMutation({
@@ -107,6 +119,32 @@ export function useGenerate(project: string | null) {
   return useMutation({
     mutationFn: (vars: { assetId: string; stages: StageKey[] }) =>
       api.generate(project as string, vars.assetId, vars.stages),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useSetAssetGen3d(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { assetId: string; gen3d: Partial<Gen3d> }) =>
+      api.setAssetGen3d(project as string, vars.assetId, vars.gen3d),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useEditImage(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      assetId: string;
+      prompt: string;
+      maskBytes: number[] | null;
+    }) =>
+      api.editImage(project as string, vars.assetId, vars.prompt, vars.maskBytes),
     onSuccess: () => {
       if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
     },

@@ -13,6 +13,8 @@ export interface Asset {
   backend: Backend;
   source: "openai" | "manual";
   createdAt: string; // disk: created_at
+  /** Per-asset 3D generation override (partial). Absent → uses global defaults. */
+  gen3d?: Partial<Gen3d>;
 }
 
 export interface StageState {
@@ -25,6 +27,8 @@ export interface StageState {
 export interface Project {
   name: string;
   createdAt: string; // disk: created_at
+  /** Free-text style applied to every asset's image prompt. */
+  style: string;
   assets: Asset[];
 }
 

@@ -300,6 +300,7 @@ impl Runner {
 
         let name = asset.get("name").and_then(|x| x.as_str()).unwrap_or("");
         let description = asset.get("description").and_then(|x| x.as_str()).unwrap_or("");
+        let style = self.store.project_style(project).unwrap_or_default();
         let model = cfg.get("openai_model").and_then(|x| x.as_str()).unwrap_or("");
         let quality = cfg
             .get("openai_quality")
@@ -311,6 +312,7 @@ impl Runner {
         let meta = self.worker.multiview(
             name,
             description,
+            &style,
             &output_dir.to_string_lossy(),
             &api_key,
             model,
@@ -341,8 +343,14 @@ impl Runner {
         let asset_backend = asset.get("backend").and_then(|x| x.as_str()).unwrap_or("auto");
         let backend = self.supervisor.resolve_backend(asset_backend);
         let seed = worker::seed_from_id(asset_id);
+        // Global gen3d defaults, with the per-asset override (snake_case on disk)
+        // merged on top so the UI can tune polygon count / steps per asset.
         let gen3d_cfg = cfg.get("gen3d").cloned().unwrap_or(Value::Null);
-        let gen3d = Gen3d::from_config(&gen3d_cfg);
+        let gen3d_merged = match asset.get("gen3d") {
+            Some(over) => crate::config::deep_merge(&gen3d_cfg, over),
+            None => gen3d_cfg,
+        };
+        let gen3d = Gen3d::from_config(&gen3d_merged);
         let dest = self.store.model_path(project, asset_id)?;
         let base_url = self.supervisor.ensure(&backend, 900)?;
 
