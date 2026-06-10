@@ -333,6 +333,7 @@ pub struct ConfigPublic {
     pub budget_usd: f64,
     pub default_backend: String,
     pub workspace_dir: String,
+    pub multiview_prompt_template: String,
     pub openai_key_set: bool,
     pub elevenlabs_key_set: bool,
     pub audio: AudioConfigPublic,
@@ -359,6 +360,7 @@ impl ConfigPublic {
                 .unwrap_or("v21")
                 .to_string(),
             workspace_dir: str_field(cfg, "workspace_dir"),
+            multiview_prompt_template: str_field(cfg, "multiview_prompt_template"),
             openai_key_set: key_set,
             elevenlabs_key_set,
             audio: AudioConfigPublic::from_config(cfg),
@@ -494,6 +496,7 @@ pub struct ConfigPatch {
     pub budget_usd: Option<f64>,
     pub default_backend: Option<String>,
     pub workspace_dir: Option<String>,
+    pub multiview_prompt_template: Option<String>,
     pub elevenlabs_api_key: Option<String>,
     pub audio: Option<AudioPatch>,
     pub gen3d: Option<Gen3dPatch>,
@@ -528,6 +531,9 @@ impl ConfigPatch {
         }
         if let Some(v) = &self.workspace_dir {
             obj.insert("workspace_dir".into(), Value::String(v.clone()));
+        }
+        if let Some(v) = &self.multiview_prompt_template {
+            obj.insert("multiview_prompt_template".into(), Value::String(v.clone()));
         }
         if let Some(v) = &self.elevenlabs_api_key {
             obj.insert("elevenlabs_api_key".into(), Value::String(v.clone()));

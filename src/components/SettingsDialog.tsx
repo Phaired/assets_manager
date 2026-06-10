@@ -7,10 +7,13 @@ import {
   FolderOpen,
   Download,
   ChevronDown,
+  PersonStanding,
+  Package,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import type { ConfigPatch, Gen3d } from "../lib/types";
+import { MULTIVIEW_TEMPLATES } from "../lib/constants";
 import { HunyuanInstaller } from "./HunyuanInstaller";
 import {
   useConfig,
@@ -36,6 +39,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Textarea } from "@/components/ui/textarea";
 
 interface GenNum {
   key: keyof Gen3d;
@@ -81,6 +85,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [cost, setCost] = useState("");
   const [timeout, setTimeoutVal] = useState("");
   const [backend, setBackend] = useState<"v21" | "mv2">("v21");
+  const [promptTemplate, setPromptTemplate] = useState("");
   const [gen, setGen] = useState<Gen3d | null>(null);
   const [hun, setHun] = useState<HunyuanForm | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -99,6 +104,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     setCost(String(c.estimatedCostPerImage));
     setTimeoutVal(String(c.openaiTimeout));
     setBackend(c.defaultBackend);
+    setPromptTemplate(c.multiviewPromptTemplate);
     setGen(c.gen3d);
     setHun({
       v21: {
@@ -153,6 +159,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       estimatedCostPerImage: parseFloat(cost),
       openaiTimeout: parseInt(timeout, 10),
       defaultBackend: backend,
+      multiviewPromptTemplate: promptTemplate,
       gen3d,
     };
     if (key.trim()) patch.openaiApiKey = key.trim();
@@ -309,6 +316,49 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 Workspace :{" "}
                 <code className="font-mono">{c.workspaceDir}</code>
               </p>
+
+              <Separator />
+
+              <h3 className="text-sm font-semibold">
+                Prompt de base (planche multivue)
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Gabarit envoyé à OpenAI pour générer la planche 4 vues.{" "}
+                <code className="font-mono">{"{subject}"}</code> = description
+                de l'asset (ou son nom),{" "}
+                <code className="font-mono">{"{style}"}</code> = style du
+                projet. Laisser vide pour revenir au gabarit par défaut.
+              </p>
+              <Textarea
+                rows={12}
+                className="font-mono text-xs leading-relaxed"
+                value={promptTemplate}
+                onChange={(e) => setPromptTemplate(e.target.value)}
+                aria-label="Gabarit du prompt multivue"
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  Préréglages :
+                </span>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() =>
+                    setPromptTemplate(MULTIVIEW_TEMPLATES.character)
+                  }
+                >
+                  <PersonStanding size={13} /> Personnage (défaut)
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setPromptTemplate(MULTIVIEW_TEMPLATES.object)}
+                >
+                  <Package size={13} /> Objet / prop
+                </Button>
+              </div>
 
               <Separator />
 

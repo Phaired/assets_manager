@@ -94,6 +94,42 @@ fn hunyuan_default(dir: &str, python: &str) -> (String, String) {
     }
 }
 
+/// Default multiview prompt template. `{subject}` is replaced by the asset's
+/// description (or its name as fallback), `{style}` by the project's free-text
+/// style. Editable in the settings (`multiview_prompt_template`); a blank
+/// stored value falls back to this default.
+/// Keep in sync with `MULTIVIEW_TEMPLATES.character` in src/lib/constants.ts.
+pub const DEFAULT_MULTIVIEW_TEMPLATE: &str = "Create one production-ready 2x2 orthographic character turnaround sheet for multi-view image-to-3D reconstruction.
+CHARACTER: {subject}.
+{style}
+PANEL ORDER: top-left exact front view; top-right exact back view; bottom-left exact left profile; bottom-right exact right profile.
+CONSISTENCY: depict the exact same single character in all four panels. Lock identical body proportions, colors, matte materials, accessories and neutral relaxed A-pose. Front and back must match. Left and right profiles must be true mirrored orthographic profiles, not three-quarter views.
+FRAMING: show the complete character from highest point to soles in every panel. The character must occupy only about 60 percent of each panel height, centered horizontally and vertically, with at least 15 percent empty background above, below, left and right. Keep a clearly visible gap below the feet. Nothing may touch or cross a panel edge or the sheet midpoint.
+STYLE: appealing original stylized game character, simple polished low-poly 3D render, broad readable volumes, a few large flat color regions, very simple matte textures, no tiny details. Keep arms, legs and accessories clearly separated from the torso.
+BACKGROUND: perfectly uniform solid light gray in all panels. No floor, horizon, cast shadow, ambient shadow, reflection, gradient, scenery or props.
+STRICTLY AVOID: cropping, labels, letters, text, panel borders, extra objects, extra characters, perspective view, three-quarter view, dynamic pose or inconsistent design.";
+
+/// Render the multiview prompt from the configured template. `{subject}` gets
+/// the asset description (or name), `{style}` the project style (possibly
+/// empty). A blank template falls back to the built-in default.
+pub fn render_multiview_prompt(cfg: &Value, name: &str, description: &str, style: &str) -> String {
+    let template = cfg
+        .get("multiview_prompt_template")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DEFAULT_MULTIVIEW_TEMPLATE);
+    let subject = if !description.trim().is_empty() {
+        description.trim()
+    } else if !name.trim().is_empty() {
+        name.trim()
+    } else {
+        "an original stylized game asset"
+    };
+    template
+        .replace("{subject}", subject)
+        .replace("{style}", style.trim())
+}
+
 /// Identical to the original Python `DEFAULTS` (workspace/Hunyuan paths resolved
 /// at runtime — see `data_root` and `hunyuan_default`).
 pub fn defaults() -> Value {
@@ -103,6 +139,7 @@ pub fn defaults() -> Value {
         hunyuan_default("C:\\dev\\3dmodel\\Hunyuan3D-2", "C:\\dev\\3dmodel\\Hunyuan3D-2\\.venv\\Scripts\\python.exe");
     json!({
         "workspace_dir": data_root().join("workspace").to_string_lossy(),
+        "multiview_prompt_template": DEFAULT_MULTIVIEW_TEMPLATE,
         "openai_api_key": "",
         "openai_model": "gpt-image-2",
         "openai_quality": "medium",

@@ -3,164 +3,28 @@
 The logic here is ported VERBATIM (same parameters, same order) from the
 original ``app/pipeline/`` modules:
 
-- ``multiview.py``  : OpenAI 2x2 sheet generation + split/pad.
 - ``hunyuan_client.py`` : seed_from_id, generate_v21 payload, generate_mv2 gradio arg order.
 - ``mesh.py``       : finalize_glb / reduce_textured_glb.
 - ``export_obj.py`` : export_one.
 
-All heavy third-party imports (PIL, httpx, gradio_client, pymeshlab, trimesh,
-numpy) are kept LAZY inside the functions so that importing this module — and
-therefore ``GET /health`` — stays instant.
+The OpenAI image stages (multiview sheet + edit) moved to Rust
+(src-tauri/src/openai.rs). All heavy third-party imports (gradio_client,
+pymeshlab, trimesh, numpy) are kept LAZY inside the functions so that importing
+this module — and therefore ``GET /health`` — stays instant.
 """
 from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import shutil
 import tempfile
-from io import BytesIO
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
 # Constants (verbatim from the originals)
 # --------------------------------------------------------------------------- #
 
-API_URL = "https://api.openai.com/v1/images/generations"
-EDIT_URL = "https://api.openai.com/v1/images/edits"
 VIEW_FILES = ("front.png", "back.png", "left.png", "right.png")
-
-
-# --------------------------------------------------------------------------- #
-# Multiview (port of app/pipeline/multiview.py)
-# --------------------------------------------------------------------------- #
-
-def prompt_for(name: str, description: str, extra: str = "") -> str:
-    """Gabarit de planche multivue (turnaround 2x2). Fidele a l'original."""
-    character = description.strip() or name.strip() or "an original stylized game character"
-    special = f"\n{extra.strip()}" if extra.strip() else ""
-    return f"""Create one production-ready 2x2 orthographic character turnaround sheet for multi-view image-to-3D reconstruction.
-CHARACTER: {character}.
-{special}
-PANEL ORDER: top-left exact front view; top-right exact back view; bottom-left exact left profile; bottom-right exact right profile.
-CONSISTENCY: depict the exact same single character in all four panels. Lock identical body proportions, colors, matte materials, accessories and neutral relaxed A-pose. Front and back must match. Left and right profiles must be true mirrored orthographic profiles, not three-quarter views.
-FRAMING: show the complete character from highest point to soles in every panel. The character must occupy only about 60 percent of each panel height, centered horizontally and vertically, with at least 15 percent empty background above, below, left and right. Keep a clearly visible gap below the feet. Nothing may touch or cross a panel edge or the sheet midpoint.
-STYLE: appealing original stylized game character, simple polished low-poly 3D render, broad readable volumes, a few large flat color regions, very simple matte textures, no tiny details. Keep arms, legs and accessories clearly separated from the torso.
-BACKGROUND: perfectly uniform solid light gray in all panels. No floor, horizon, cast shadow, ambient shadow, reflection, gradient, scenery or props.
-STRICTLY AVOID: cropping, labels, letters, text, panel borders, extra objects, extra characters, perspective view, three-quarter view, dynamic pose or inconsistent design."""
-
-
-def request_image(api_key: str, prompt: str, model: str, quality: str, timeout: int) -> bytes:
-    """POST /v1/images/generations. Returns the raw PNG bytes of the 2x2 sheet."""
-    from urllib.request import Request, urlopen
-
-    payload = json.dumps({
-        "model": model,
-        "prompt": prompt,
-        "n": 1,
-        "size": "1536x1024",
-        "quality": quality,
-        "output_format": "png",
-    }).encode("utf-8")
-    request = Request(
-        API_URL,
-        data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    with urlopen(request, timeout=timeout) as response:
-        result = json.loads(response.read().decode("utf-8"))
-    image = result["data"][0]
-    if image.get("b64_json"):
-        return base64.b64decode(image["b64_json"])
-    if image.get("url"):
-        with urlopen(image["url"], timeout=timeout) as response:
-            return response.read()
-    raise RuntimeError("OpenAI response did not contain b64_json or url")
-
-
-def edit_image(api_key: str, image_path: Path, prompt: str, model: str, size: str,
-               quality: str, timeout: int, mask_path: "Path | None" = None) -> bytes:
-    """POST /v1/images/edits (multipart). Returns the edited PNG bytes.
-
-    When ``mask_path`` is given, only its transparent pixels are edited (OpenAI
-    inpainting semantics). Used to retouch an asset's source image precisely
-    (e.g. recolor one object) before 3D reconstruction.
-    """
-    import httpx
-
-    files = {"image": ("image.png", Path(image_path).read_bytes(), "image/png")}
-    if mask_path is not None:
-        files["mask"] = ("mask.png", Path(mask_path).read_bytes(), "image/png")
-    data = {
-        "model": model,
-        "prompt": prompt,
-        "n": "1",
-        "quality": quality,
-    }
-    # /images/edits does NOT accept size="auto" (unlike generations). Only send an
-    # explicit resolution; otherwise omit it so the API matches the input image.
-    if size and size != "auto":
-        data["size"] = size
-    headers = {"Authorization": f"Bearer {api_key}"}
-    with httpx.Client(timeout=timeout) as client:
-        response = client.post(EDIT_URL, headers=headers, data=data, files=files)
-    if response.status_code != 200:
-        raise RuntimeError(f"/images/edits HTTP {response.status_code}: {response.text[:500]}")
-    result = response.json()
-    image = result["data"][0]
-    if image.get("b64_json"):
-        return base64.b64decode(image["b64_json"])
-    if image.get("url"):
-        with httpx.Client(timeout=timeout) as client:
-            return client.get(image["url"]).content
-    raise RuntimeError("OpenAI edit response did not contain b64_json or url")
-
-
-def pad_square(image, background=(235, 237, 240)):
-    from PIL import Image
-
-    image = image.convert("RGB")
-    side = max(image.size)
-    canvas = Image.new("RGB", (side, side), background)
-    canvas.paste(image, ((side - image.width) // 2, (side - image.height) // 2))
-    return canvas.resize((1024, 1024), Image.Resampling.LANCZOS)
-
-
-def split_sheet(sheet_bytes: bytes, output_dir: Path) -> None:
-    from PIL import Image
-
-    with Image.open(BytesIO(sheet_bytes)) as source:
-        sheet = source.convert("RGB")
-    width, height = sheet.size
-    mid_x, mid_y = width // 2, height // 2
-    boxes = (
-        (0, 0, mid_x, mid_y),
-        (mid_x, 0, width, mid_y),
-        (0, mid_y, mid_x, height),
-        (mid_x, mid_y, width, height),
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    sheet.save(output_dir / "sheet.png")
-    for filename, box in zip(VIEW_FILES, boxes):
-        pad_square(sheet.crop(box)).save(output_dir / filename)
-
-
-def run_multiview(*, name: str, description: str, output_dir: Path, api_key: str,
-                  model: str, quality: str, timeout: int, style: str = "") -> dict:
-    """Generate and split the multiview sheet.
-
-    Budget is enforced in Rust BEFORE this is called — the worker just generates.
-    Returns the meta dict ``{cost, model, quality, files}``. ``cost`` is computed
-    by Rust from config; here we echo back the per-image cost passed implicitly
-    through Rust's accounting, so we report nothing about spend and let Rust add
-    it. The original returned ``est_cost`` as ``cost`` — Rust supplies that via
-    config, so we surface a deterministic ``files`` list.
-    """
-    prompt = prompt_for(name, description, extra=style)
-    image_bytes = request_image(api_key, prompt, model, quality, timeout)
-    split_sheet(image_bytes, output_dir)
-    return {"model": model, "quality": quality, "files": ["sheet.png", *VIEW_FILES]}
 
 
 # --------------------------------------------------------------------------- #

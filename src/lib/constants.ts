@@ -54,6 +54,33 @@ export const AUDIO_KIND_ACCENT: Record<AudioKind, string> = {
   music: "#34d399", // emerald
 };
 
+// --- multiview prompt templates -------------------------------------------
+// `{subject}` = description de l'asset (ou son nom) ; `{style}` = style du
+// projet. « character » DOIT rester identique a DEFAULT_MULTIVIEW_TEMPLATE
+// dans src-tauri/src/config.rs (c'est le defaut applique quand le reglage est
+// vide). « object » est une variante neutre pour les props/objets.
+
+export const MULTIVIEW_TEMPLATES = {
+  character: `Create one production-ready 2x2 orthographic character turnaround sheet for multi-view image-to-3D reconstruction.
+CHARACTER: {subject}.
+{style}
+PANEL ORDER: top-left exact front view; top-right exact back view; bottom-left exact left profile; bottom-right exact right profile.
+CONSISTENCY: depict the exact same single character in all four panels. Lock identical body proportions, colors, matte materials, accessories and neutral relaxed A-pose. Front and back must match. Left and right profiles must be true mirrored orthographic profiles, not three-quarter views.
+FRAMING: show the complete character from highest point to soles in every panel. The character must occupy only about 60 percent of each panel height, centered horizontally and vertically, with at least 15 percent empty background above, below, left and right. Keep a clearly visible gap below the feet. Nothing may touch or cross a panel edge or the sheet midpoint.
+STYLE: appealing original stylized game character, simple polished low-poly 3D render, broad readable volumes, a few large flat color regions, very simple matte textures, no tiny details. Keep arms, legs and accessories clearly separated from the torso.
+BACKGROUND: perfectly uniform solid light gray in all panels. No floor, horizon, cast shadow, ambient shadow, reflection, gradient, scenery or props.
+STRICTLY AVOID: cropping, labels, letters, text, panel borders, extra objects, extra characters, perspective view, three-quarter view, dynamic pose or inconsistent design.`,
+  object: `Create one production-ready 2x2 orthographic turnaround sheet of a single object for multi-view image-to-3D reconstruction.
+SUBJECT: {subject}.
+{style}
+PANEL ORDER: top-left exact front view; top-right exact back view; bottom-left exact left side view; bottom-right exact right side view.
+CONSISTENCY: depict the exact same single object in all four panels. Lock identical proportions, colors, matte materials and orientation. Front and back must match. Left and right sides must be true mirrored orthographic side views, not three-quarter views.
+FRAMING: show the complete object in every panel. The object must occupy only about 60 percent of each panel height, centered horizontally and vertically, with at least 15 percent empty background above, below, left and right. Nothing may touch or cross a panel edge or the sheet midpoint.
+STYLE: stylized game prop, simple polished low-poly 3D render, broad readable volumes, a few large flat color regions, very simple matte textures, no tiny details.
+BACKGROUND: perfectly uniform solid light gray in all panels. No floor, horizon, cast shadow, ambient shadow, reflection, gradient, scenery or props.
+STRICTLY AVOID: cropping, labels, letters, text, panel borders, extra objects, extra characters, perspective view, three-quarter view or inconsistent design.`,
+} as const;
+
 // Prompts d'exemple — meme style que tools/brainrot_manifest.py : syntagme nominal
 // anglais, concis et concret (type de creature + couleurs/matieres/accessoires),
 // SANS mots de style (le gabarit prompt_for ajoute deja low-poly / matte / flat colors).

@@ -10,6 +10,7 @@ mod error;
 mod events;
 mod installer;
 mod jobs;
+mod openai;
 mod store;
 mod supervisor;
 mod types;

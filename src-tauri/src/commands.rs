@@ -16,7 +16,6 @@ use crate::installer::Installer;
 use crate::jobs::JobManager;
 use crate::store::Store;
 use crate::supervisor::Supervisor;
-use crate::worker::WorkerClient;
 use crate::types::{
     Asset, AudioBundle, AudioItem, ConfigPatch, ConfigPublic, Gen3dPatch, InstallProgress,
     JobCurrent, Project, ProjectBundle, ProjectState, ServerStatus, Voice, VoicePreview,
@@ -195,7 +194,6 @@ pub fn edit_image(
     app: tauri::AppHandle,
     config: State<'_, Arc<Config>>,
     store: State<'_, Arc<Store>>,
-    worker: State<'_, Arc<WorkerClient>>,
     project: String,
     asset_id: String,
     prompt: String,
@@ -266,23 +264,30 @@ pub fn edit_image(
         .unwrap_or("medium");
     let timeout = cfg.get("openai_timeout").and_then(|x| x.as_i64()).unwrap_or(300);
 
-    let result = worker.edit_image(
-        &base.to_string_lossy(),
+    // Pure-Rust OpenAI edit call (the Python worker is not involved).
+    let result = crate::openai::edit_image(
+        &api_key,
+        &base,
         prompt.trim(),
-        mask_path.as_ref().map(|p| p.to_string_lossy().to_string()).as_deref(),
         model,
         "", // size omitted for edits (API matches the input image; "auto" is invalid here)
         quality,
-        &api_key,
         timeout,
-        &source.to_string_lossy(),
+        mask_path.as_deref(),
     );
 
     // Always clean up the temp mask.
     if let Some(p) = &mask_path {
         let _ = std::fs::remove_file(p);
     }
-    result?;
+    let edited = result?;
+
+    // Overwrite source.png with the edited image.
+    if let Some(parent) = source.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::from)?;
+    }
+    std::fs::write(&source, &edited)
+        .map_err(|e| AppError::msg(format!("écriture de l'image éditée: {e}")))?;
 
     // Account spend, flip to a manual source, invalidate downstream stages.
     let _ = store.add_spend(&project, est_cost)?;

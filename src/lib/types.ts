@@ -136,6 +136,7 @@ export interface ConfigPublic {
   budgetUsd: number;
   defaultBackend: "v21" | "mv2";
   workspaceDir: string;
+  multiviewPromptTemplate: string;
   openaiKeySet: boolean;
   elevenlabsKeySet: boolean;
   audio: AudioConfig;
@@ -155,6 +156,7 @@ export interface ConfigPatch {
   budgetUsd?: number;
   defaultBackend?: "v21" | "mv2";
   workspaceDir?: string;
+  multiviewPromptTemplate?: string;
   elevenlabsApiKey?: string;
   audio?: Partial<AudioConfig>;
   gen3d?: Partial<Gen3d>;

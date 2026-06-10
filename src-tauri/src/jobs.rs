@@ -307,24 +307,17 @@ impl Runner {
             .and_then(|x| x.as_str())
             .unwrap_or("medium");
         let timeout = cfg.get("openai_timeout").and_then(|x| x.as_i64()).unwrap_or(300);
+        let prompt = crate::config::render_multiview_prompt(cfg, name, description, &style);
         let output_dir = self.store.multiview_dir(project, asset_id)?;
 
-        let meta = self.worker.multiview(
-            name,
-            description,
-            &style,
-            &output_dir.to_string_lossy(),
-            &api_key,
-            model,
-            quality,
-            timeout,
-            est_cost,
-        )?;
+        // Pure-Rust OpenAI call + sheet split (the Python worker is not involved).
+        let meta =
+            crate::openai::run_multiview(&api_key, &prompt, model, quality, timeout, &output_dir)?;
 
-        let cost = meta.get("cost").and_then(|x| x.as_f64()).unwrap_or(est_cost);
-        let spent = self.store.add_spend(project, cost)?;
+        let spent = self.store.add_spend(project, est_cost)?;
 
         let mut meta_obj = meta.as_object().cloned().unwrap_or_default();
+        meta_obj.insert("cost".into(), json!(est_cost));
         meta_obj.insert("estimated_spend_usd".into(), json!(spent));
 
         self.store.update_stage(

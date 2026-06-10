@@ -6,14 +6,15 @@ Importable as ``worker.main:app``. Launched by Rust from the project venv:
 
 Endpoints (see CONTRACT.md "Python worker sidecar — HTTP API"):
     GET  /health     -> {"ok": true}
-    POST /multiview  -> {cost, model, quality, files}
     POST /gen3d      -> {faces?, textures?, reduced, backend, seed, output, note?}
     POST /export     -> {faces, textured}
 
+The OpenAI image stages (multiview sheet, image edit) live in Rust
+(src-tauri/src/openai.rs) — the worker only does the Python-bound 3D work.
 Request bodies arrive as camelCase JSON from Rust. Heavy imports
-(pymeshlab/trimesh/gradio_client/PIL/httpx) are kept lazy inside the stage
-functions so ``/health`` responds instantly. The worker persists nothing and
-enforces no budget (Rust does that before calling).
+(pymeshlab/trimesh/gradio_client) are kept lazy inside the stage functions so
+``/health`` responds instantly. The worker persists nothing and enforces no
+budget (Rust does that before calling).
 
 On any failure we respond with HTTP 4xx/5xx and JSON ``{"detail": "<message>"}``.
 """
@@ -63,20 +64,6 @@ class Gen3d(BaseModel):
         }
 
 
-class MultiviewRequest(BaseModel):
-    name: str
-    description: str = ""
-    style: str = ""
-    outputDir: str
-    apiKey: str
-    model: str
-    quality: str
-    timeout: int = 180
-    # Optional echo: Rust owns budget/cost accounting, but if it passes a
-    # per-image cost we surface it back in the response. Absent -> 0.0.
-    estimatedCostPerImage: float = 0.0
-
-
 class Gen3dRequest(BaseModel):
     backend: Literal["v21", "mv2"]
     baseUrl: str
@@ -92,18 +79,6 @@ class ExportRequest(BaseModel):
     dest: str
 
 
-class EditImageRequest(BaseModel):
-    imagePath: str
-    prompt: str
-    maskPath: Optional[str] = None
-    model: str
-    size: str = "auto"
-    quality: str = "medium"
-    apiKey: str
-    timeout: int = 300
-    dest: str
-
-
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
@@ -111,25 +86,6 @@ class EditImageRequest(BaseModel):
 @app.get("/health")
 def health() -> dict:
     return {"ok": True}
-
-
-@app.post("/multiview")
-def multiview(req: MultiviewRequest) -> dict:
-    """OpenAI 2x2 sheet -> split into sheet/front/back/left/right.png in outputDir."""
-    try:
-        meta = stages.run_multiview(
-            name=req.name,
-            description=req.description,
-            style=req.style,
-            output_dir=Path(req.outputDir),
-            api_key=req.apiKey,
-            model=req.model,
-            quality=req.quality,
-            timeout=req.timeout,
-        )
-    except Exception as error:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=_msg(error))
-    return {"cost": req.estimatedCostPerImage, **meta}
 
 
 @app.post("/gen3d")
@@ -165,33 +121,6 @@ def gen3d(req: Gen3dRequest) -> dict:
         raise HTTPException(status_code=502, detail=_msg(error))
 
     return {**meta, "backend": req.backend, "seed": seed, "output": str(dest)}
-
-
-@app.post("/edit_image")
-def edit_image(req: EditImageRequest) -> dict:
-    """OpenAI image edit (prompt + optional mask) -> overwrite the dest PNG."""
-    image = Path(req.imagePath)
-    if not image.is_file():
-        raise HTTPException(status_code=422, detail=f"image introuvable: {image}")
-    if req.maskPath and not Path(req.maskPath).is_file():
-        raise HTTPException(status_code=422, detail=f"masque introuvable: {req.maskPath}")
-    try:
-        out = stages.edit_image(
-            api_key=req.apiKey,
-            image_path=image,
-            prompt=req.prompt,
-            model=req.model,
-            size=req.size,
-            quality=req.quality,
-            timeout=req.timeout,
-            mask_path=Path(req.maskPath) if req.maskPath else None,
-        )
-    except Exception as error:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=_msg(error))
-    dest = Path(req.dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(out)
-    return {"output": str(dest)}
 
 
 @app.post("/export")

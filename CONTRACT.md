@@ -15,11 +15,11 @@ implement against it: **Rust core** (`src-tauri/`), **Python worker** (`worker/`
 │        ▼                                                     │
 │  Rust core  (src-tauri/)                                     │
 │    config · store · jobs(queue) · hunyuan supervisor         │
+│    openai (multiview sheet + image edit, pure Rust)          │
 │        │  HTTP (reqwest) to 127.0.0.1:<worker_port>          │
 │        ▼                                                     │
 │  Python worker sidecar (worker/)  — stateless ML ops         │
-│    multiview(OpenAI) · gen3d(Hunyuan v21/mv2 + mesh reduce)  │
-│    · export(OBJ)                                             │
+│    gen3d(Hunyuan v21/mv2 + mesh reduce) · export(OBJ)        │
 │                                                              │
 │  Rust ALSO spawns the Hunyuan model servers directly         │
 │  (separate venvs from config.hunyuan[backend]) and probes    │
@@ -29,10 +29,12 @@ implement against it: **Rust core** (`src-tauri/`), **Python worker** (`worker/`
 ```
 
 Rust owns ALL state and orchestration (config, projects/assets/state JSON on disk,
-job queue, budget accounting, Hunyuan server lifecycle). Python is a pure, stateless
-compute worker: it receives paths + params, does the heavy ML, writes output files,
-returns a small JSON meta. The OpenAI key and all config live in Rust and are passed
-into worker requests as needed — the worker persists nothing.
+job queue, budget accounting, Hunyuan server lifecycle) AND the OpenAI image calls
+(`src-tauri/src/openai.rs`: multiview sheet generation + split, image edits — the
+prompt is rendered in Rust from the configurable `multiview_prompt_template`,
+placeholders `{subject}`/`{style}`). Python is a pure, stateless compute worker for
+the 3D-bound stages only: it receives paths + params, does the heavy ML, writes
+output files, returns a small JSON meta. The worker persists nothing.
 
 Workspace layout on disk is UNCHANGED from the original app:
 ```
@@ -168,7 +170,6 @@ Rust picks a free port and passes it; worker also accepts `--port`. Rust waits f
 | endpoint | body | returns | does |
 |---|---|---|---|
 | `GET /health` | – | `{ ok: true }` | readiness |
-| `POST /multiview` | `{ name, description, outputDir, apiKey, model, quality, timeout }` | `{ cost, model, quality, files: string[] }` | OpenAI 2x2 sheet → split into sheet/front/back/left/right.png in outputDir. (Budget is checked in RUST before calling.) Raise 4xx/5xx with detail on failure. |
 | `POST /gen3d` | `{ backend:"v21"\|"mv2", baseUrl, seed, gen3d:Gen3d, dest, imagePath?, viewDir? }` | `{ faces?, textures?, reduced, backend, seed, output, note? }` | v21: base64 POST `{baseUrl}/generate`; mv2: gradio_client `/generation_all` on `{baseUrl}`. Then mesh-reduce (pymeshlab/trimesh) to `dest`. On reduce failure, copy raw glb and set `reduced:false,note`. |
 | `POST /export` | `{ glb, dest }` | `{ faces, textured }` | trimesh GLB→OBJ(+mtl+texture) in dest's own dir. |
 
@@ -176,9 +177,11 @@ Worker errors: respond with HTTP 4xx/5xx and JSON `{ detail: "<message>" }`; Rus
 surfaces `detail` into the stage `error`.
 
 ### ML logic to port verbatim from the original `app/pipeline/`
-- `multiview.py`: prompt template `prompt_for`, OpenAI `/v1/images/generations`
-  (size 1536x1024, output_format png, n=1), `split_sheet` (2x2 crop), `pad_square`
-  (center on (235,237,240), 1024² LANCZOS). VIEW_FILES = front/back/left/right.
+- `multiview.py`: MOVED TO RUST (`src-tauri/src/openai.rs`) — configurable prompt
+  template (config `multiview_prompt_template`, `{subject}`/`{style}`), OpenAI
+  `/v1/images/generations` (size 1536x1024, output_format png, n=1), `split_sheet`
+  (2x2 crop), `pad_square` (center on (235,237,240), 1024² Lanczos).
+  VIEW_FILES = front/back/left/right.
 - `hunyuan_client.py`: `seed_from_id` (sha256→int%10_000_000), `generate_v21`
   payload keys EXACTLY: image(b64), remove_background, texture, seed, octree_resolution,
   num_inference_steps(=stepsV21), guidance_scale, num_chunks, face_count(=faceCountV21),
@@ -196,9 +199,10 @@ itself `error` and ABORTS the remaining stages of that job.
 1. **multiview**: if `asset.source=="manual"` and source.png exists → mark done
    `{source:"manual"}`, skip OpenAI. Else: require OpenAI key (else error). Budget gate:
    `projected = state.estimated_spend_usd + estimatedCostPerImage`; if
-   `projected > budgetUsd + 1e-9` → error "budget atteint…". Call worker `/multiview`
-   (outputDir = `<asset>/multiview`, apiKey from config). On success: `add_spend(cost)`,
-   stage done with meta incl. `estimatedSpendUsd`.
+   `projected > budgetUsd + 1e-9` → error "budget atteint…". Render the prompt from
+   `multiview_prompt_template` (`{subject}` = description|name, `{style}` = project
+   style) then call `openai::run_multiview` in-process (outputDir = `<asset>/multiview`).
+   On success: `add_spend(est_cost)`, stage done with meta incl. `estimatedSpendUsd`.
 2. **model3d**: resolve backend (`auto`→running server else `default_backend`).
    `ensure(backend)` via supervisor (spawn Hunyuan if needed, wait healthy, returns
    base_url). Inputs: v21 → source.png if present else multiview/front.png (error if

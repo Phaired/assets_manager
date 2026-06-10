@@ -1,6 +1,7 @@
 //! Python worker sidecar: spawn `<.venv python> -m uvicorn worker.main:app
 //! --host 127.0.0.1 --port <free port>`, wait for GET /health, supervise it, and
-//! expose blocking HTTP calls (multiview / gen3d / export) with long timeouts.
+//! expose blocking HTTP calls (gen3d / export) with long timeouts. The OpenAI
+//! image stages (multiview, edit) are pure Rust — see `openai.rs`.
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -46,24 +47,6 @@ fn pick_free_port() -> AppResult<u16> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MultiviewReq<'a> {
-    name: &'a str,
-    description: &'a str,
-    /// Project-level style appended to the image prompt (empty when unset).
-    style: &'a str,
-    output_dir: String,
-    api_key: &'a str,
-    model: &'a str,
-    quality: &'a str,
-    timeout: i64,
-    /// Per-image cost from config. The worker echoes this back as `cost` so Rust's
-    /// budget accounting (`add_spend`) gets the real value; the original Python
-    /// `generate_multiview` returned `est_cost` as `cost`.
-    estimated_cost_per_image: f64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct Gen3dReq<'a> {
     backend: &'a str,
     base_url: &'a str,
@@ -80,21 +63,6 @@ struct Gen3dReq<'a> {
 #[serde(rename_all = "camelCase")]
 struct ExportReq {
     glb: String,
-    dest: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EditImageReq<'a> {
-    image_path: &'a str,
-    prompt: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mask_path: Option<String>,
-    model: &'a str,
-    size: &'a str,
-    quality: &'a str,
-    api_key: &'a str,
-    timeout: i64,
     dest: String,
 }
 
@@ -296,34 +264,6 @@ impl WorkerClient {
 
     // --- worker operations ----------------------------------------------
 
-    /// POST /multiview (~300s). Budget is checked in Rust before calling.
-    #[allow(clippy::too_many_arguments)]
-    pub fn multiview(
-        &self,
-        name: &str,
-        description: &str,
-        style: &str,
-        output_dir: &str,
-        api_key: &str,
-        model: &str,
-        quality: &str,
-        timeout: i64,
-        estimated_cost_per_image: f64,
-    ) -> AppResult<Value> {
-        let body = MultiviewReq {
-            name,
-            description,
-            style,
-            output_dir: output_dir.to_string(),
-            api_key,
-            model,
-            quality,
-            timeout,
-            estimated_cost_per_image,
-        };
-        self.post_json(&self.long, "/multiview", &body, Duration::from_secs(300))
-    }
-
     /// POST /gen3d (~3600s).
     #[allow(clippy::too_many_arguments)]
     pub fn gen3d(
@@ -346,34 +286,6 @@ impl WorkerClient {
             view_dir: view_dir.map(|s| s.to_string()),
         };
         self.post_json(&self.long, "/gen3d", &body, Duration::from_secs(3600))
-    }
-
-    /// POST /edit_image (~300s). OpenAI image edit (prompt + optional mask).
-    #[allow(clippy::too_many_arguments)]
-    pub fn edit_image(
-        &self,
-        image_path: &str,
-        prompt: &str,
-        mask_path: Option<&str>,
-        model: &str,
-        size: &str,
-        quality: &str,
-        api_key: &str,
-        timeout: i64,
-        dest: &str,
-    ) -> AppResult<Value> {
-        let body = EditImageReq {
-            image_path,
-            prompt,
-            mask_path: mask_path.map(|s| s.to_string()),
-            model,
-            size,
-            quality,
-            api_key,
-            timeout,
-            dest: dest.to_string(),
-        };
-        self.post_json(&self.long, "/edit_image", &body, Duration::from_secs(300))
     }
 
     /// POST /export.
