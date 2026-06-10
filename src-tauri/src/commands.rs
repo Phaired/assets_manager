@@ -7,7 +7,9 @@ use std::sync::Arc;
 use image::ImageReader;
 use tauri::State;
 
+use crate::audio_jobs::AudioJobManager;
 use crate::config::Config;
+use crate::elevenlabs::ElevenLabs;
 use crate::error::AppError;
 use crate::events;
 use crate::installer::Installer;
@@ -16,8 +18,8 @@ use crate::store::Store;
 use crate::supervisor::Supervisor;
 use crate::worker::WorkerClient;
 use crate::types::{
-    Asset, ConfigPatch, ConfigPublic, Gen3dPatch, InstallProgress, JobCurrent, Project,
-    ProjectBundle, ProjectState, ServerStatus,
+    Asset, AudioBundle, AudioItem, ConfigPatch, ConfigPublic, Gen3dPatch, InstallProgress,
+    JobCurrent, Project, ProjectBundle, ProjectState, ServerStatus, Voice, VoicePreview,
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -316,7 +318,8 @@ pub fn generate(
 pub fn get_config(config: State<'_, Arc<Config>>) -> CmdResult<ConfigPublic> {
     let cfg = config.load();
     let key_set = !crate::config::openai_key(&cfg).is_empty();
-    Ok(ConfigPublic::from_config(&cfg, key_set))
+    let el_set = !crate::config::elevenlabs_key(&cfg).is_empty();
+    Ok(ConfigPublic::from_config(&cfg, key_set, el_set))
 }
 
 #[tauri::command]
@@ -331,7 +334,8 @@ pub fn update_config(
     let merged = crate::config::deep_merge(&current, &over);
     let saved = config.save(&merged)?;
     let key_set = !crate::config::openai_key(&saved).is_empty();
-    Ok(ConfigPublic::from_config(&saved, key_set))
+    let el_set = !crate::config::elevenlabs_key(&saved).is_empty();
+    Ok(ConfigPublic::from_config(&saved, key_set, el_set))
 }
 
 // --- hunyuan supervisor -------------------------------------------------
@@ -437,6 +441,219 @@ pub fn save_asset_file(
     std::fs::copy(&src, &dest)
         .map_err(|e| AppError::msg(format!("échec de la copie vers {}: {e}", dest.display())))?;
     Ok(())
+}
+
+// --- audio: voices (global catalog) -------------------------------------
+
+/// Voice Design: returns preview voices (base64 mp3 + a `generatedVoiceId`). The
+/// UI plays the previews and picks one to save via `create_voice`.
+#[tauri::command]
+pub fn design_voice(
+    config: State<'_, Arc<Config>>,
+    eleven: State<'_, Arc<ElevenLabs>>,
+    description: String,
+    preview_text: String,
+    seed: Option<i64>,
+    guidance_scale: Option<f64>,
+) -> CmdResult<Vec<VoicePreview>> {
+    let cfg = config.load();
+    let api_key = crate::config::elevenlabs_key(&cfg);
+    if api_key.is_empty() {
+        return Err("ELEVENLABS_API_KEY absent (Réglages ou .env)".into());
+    }
+    if description.trim().is_empty() {
+        return Err("la description de la voix est vide".into());
+    }
+    let model = cfg
+        .get("audio")
+        .and_then(|a| a.get("ttv_model"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("eleven_multilingual_ttv_v2");
+    eleven
+        .voice_design(
+            &api_key,
+            description.trim(),
+            preview_text.trim(),
+            model,
+            seed.unwrap_or(42),
+            guidance_scale.unwrap_or(5.0),
+        )
+        .map_err(Into::into)
+}
+
+/// Save a chosen design preview as a reusable voice in the global catalog.
+#[tauri::command]
+pub fn create_voice(
+    config: State<'_, Arc<Config>>,
+    eleven: State<'_, Arc<ElevenLabs>>,
+    store: State<'_, Arc<Store>>,
+    name: String,
+    description: String,
+    generated_voice_id: String,
+    voice_settings: Option<serde_json::Value>,
+) -> CmdResult<Voice> {
+    let cfg = config.load();
+    let api_key = crate::config::elevenlabs_key(&cfg);
+    if api_key.is_empty() {
+        return Err("ELEVENLABS_API_KEY absent (Réglages ou .env)".into());
+    }
+    if name.trim().is_empty() {
+        return Err("le nom de la voix est vide".into());
+    }
+    let voice_id = eleven.voice_create(&api_key, name.trim(), description.trim(), &generated_voice_id)?;
+    let settings = voice_settings.unwrap_or_else(|| {
+        serde_json::json!({ "stability": 0.5, "similarity_boost": 0.75 })
+    });
+    let voice = Voice {
+        voice_id,
+        name: name.trim().to_string(),
+        description: description.trim().to_string(),
+        voice_settings: settings,
+        created_at: crate::store::now(),
+    };
+    store.add_voice(&voice)?;
+    Ok(voice)
+}
+
+#[tauri::command]
+pub fn list_voices(store: State<'_, Arc<Store>>) -> CmdResult<Vec<Voice>> {
+    store.list_voices().map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn delete_voice(store: State<'_, Arc<Store>>, voice_id: String) -> CmdResult<()> {
+    store.delete_voice(&voice_id).map_err(Into::into)
+}
+
+// --- audio: items (per project) -----------------------------------------
+
+#[tauri::command]
+pub fn list_audio(
+    store: State<'_, Arc<Store>>,
+    audio_jobs: State<'_, Arc<AudioJobManager>>,
+    project: String,
+) -> CmdResult<AudioBundle> {
+    let items = store.list_audio_items(&project)?;
+    Ok(AudioBundle {
+        items,
+        jobs: audio_jobs.snapshot(),
+    })
+}
+
+#[tauri::command]
+pub fn create_audio_item(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    kind: String,
+    name: String,
+    text: String,
+    voice_id: Option<String>,
+    params: Option<serde_json::Value>,
+) -> CmdResult<AudioItem> {
+    if kind != "voice" && kind != "sfx" && kind != "music" {
+        return Err(format!("type audio invalide: {kind}"));
+    }
+    if name.trim().is_empty() {
+        return Err("le nom est vide".into());
+    }
+    if text.trim().is_empty() {
+        return Err("le texte / prompt est vide".into());
+    }
+    if kind == "voice" && voice_id.as_deref().unwrap_or("").is_empty() {
+        return Err("sélectionne une voix pour un clip de voix".into());
+    }
+    let params = params.unwrap_or_else(|| serde_json::json!({}));
+    let item = store.add_audio_item(
+        &project,
+        &kind,
+        name.trim(),
+        text.trim(),
+        voice_id.as_deref().filter(|s| !s.is_empty()),
+        params,
+    )?;
+    events::emit_project_changed(&app, &project);
+    Ok(item)
+}
+
+#[tauri::command]
+pub fn generate_audio_item(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    audio_jobs: State<'_, Arc<AudioJobManager>>,
+    project: String,
+    item_id: String,
+) -> CmdResult<()> {
+    // Validate it exists, mark queued for instant feedback, then enqueue.
+    let _ = store.get_audio_item(&project, &item_id)?;
+    store.update_audio_status(&project, &item_id, "queued", None, None)?;
+    events::emit_project_changed(&app, &project);
+    audio_jobs.enqueue(&project, &item_id)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_audio_item(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    item_id: String,
+) -> CmdResult<()> {
+    store.delete_audio_item(&project, &item_id)?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
+}
+
+// --- project-relative file source (for audio playback / download) -------
+
+#[tauri::command]
+pub fn project_file_src(
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    rel: String,
+) -> CmdResult<String> {
+    let candidate = confined_project_path(&config, &store, &project, &rel)?;
+    Ok(candidate.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn save_project_file(
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    rel: String,
+    dest: String,
+) -> CmdResult<()> {
+    let src = confined_project_path(&config, &store, &project, &rel)?;
+    if !src.is_file() {
+        return Err(format!("fichier introuvable: {rel}"));
+    }
+    let dest = std::path::PathBuf::from(&dest);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::from)?;
+    }
+    std::fs::copy(&src, &dest)
+        .map_err(|e| AppError::msg(format!("échec de la copie vers {}: {e}", dest.display())))?;
+    Ok(())
+}
+
+/// Resolve `rel` under the project dir and confine it to the workspace (no escape).
+fn confined_project_path(
+    config: &Config,
+    store: &Store,
+    project: &str,
+    rel: &str,
+) -> Result<std::path::PathBuf, AppError> {
+    let project_dir = store.project_dir(project)?;
+    let candidate = project_dir.join(rel);
+    let workspace = config.workspace_dir()?;
+    let inside =
+        candidate.starts_with(&project_dir) || crate::config::under(&workspace, &candidate);
+    if !inside {
+        return Err(AppError::msg(format!("chemin hors workspace: {rel}")));
+    }
+    Ok(candidate)
 }
 
 /// Resolve `rel` under the asset dir and confine it to the workspace (no escape).

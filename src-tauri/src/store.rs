@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
-use crate::types::{STAGES, VIEW_FILES};
+use crate::types::{AudioItem, Voice, STAGES, VIEW_FILES};
 
 /// Re-entrant global lock matching the Python `_LOCK` (RLock).
 static LOCK: ReentrantMutex<()> = ReentrantMutex::new(());
@@ -86,6 +86,32 @@ impl Store {
             .asset_dir(project, asset_id)?
             .join("obj")
             .join(format!("{asset_id}.obj")))
+    }
+
+    // --- audio paths -----------------------------------------------------
+
+    /// Absolute path of the generated mp3 for an audio item.
+    pub fn audio_file_path(&self, project: &str, kind: &str, id: &str) -> AppResult<PathBuf> {
+        Ok(self
+            .project_dir(project)?
+            .join("audio")
+            .join(kind)
+            .join(format!("{id}.mp3")))
+    }
+
+    /// Project-relative path of the generated mp3 (stored in audio.json / used by
+    /// the frontend via `convertFileSrc(project_file_src(...))`).
+    pub fn audio_file_rel(kind: &str, id: &str) -> String {
+        format!("audio/{kind}/{id}.mp3")
+    }
+
+    fn audio_manifest_path(&self, project: &str) -> AppResult<PathBuf> {
+        Ok(self.project_dir(project)?.join("audio.json"))
+    }
+
+    /// Global designed-voice catalog (reusable across projects).
+    fn voices_path(&self) -> PathBuf {
+        crate::config::data_root().join("voices.json")
     }
 
     // --- atomic io -------------------------------------------------------
@@ -500,6 +526,225 @@ impl Store {
             .filter(|v| !dir.join(v).is_file())
             .map(|v| v.to_string())
             .collect())
+    }
+
+    // --- audio items (per project, audio.json) ---------------------------
+
+    fn load_audio_raw(&self, project: &str) -> AppResult<Value> {
+        let path = self.audio_manifest_path(project)?;
+        Ok(Self::read_json(&path, json!({"version": 1, "items": []})))
+    }
+
+    fn save_audio_raw(&self, project: &str, data: &Value) -> AppResult<()> {
+        Self::write_json(&self.audio_manifest_path(project)?, data)
+    }
+
+    pub fn list_audio_items(&self, project: &str) -> AppResult<Vec<AudioItem>> {
+        let data = self.load_audio_raw(project)?;
+        Ok(data
+            .get("items")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().map(AudioItem::from_disk).collect())
+            .unwrap_or_default())
+    }
+
+    pub fn get_audio_item(&self, project: &str, item_id: &str) -> AppResult<AudioItem> {
+        self.list_audio_items(project)?
+            .into_iter()
+            .find(|it| it.id == item_id)
+            .ok_or_else(|| AppError::msg(format!("item audio introuvable: {item_id}")))
+    }
+
+    pub fn add_audio_item(
+        &self,
+        project: &str,
+        kind: &str,
+        name: &str,
+        text: &str,
+        voice_id: Option<&str>,
+        params: Value,
+    ) -> AppResult<AudioItem> {
+        let _guard = LOCK.lock();
+        // Ensure the project exists.
+        let _ = self.get_project(project)?;
+        let mut data = self.load_audio_raw(project)?;
+        let base = slugify(name);
+        let existing: std::collections::HashSet<String> = data
+            .get("items")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|it| it.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut id = base.clone();
+        let mut i = 2;
+        while existing.contains(&id) {
+            id = format!("{base}-{i}");
+            i += 1;
+        }
+        let item = json!({
+            "id": id,
+            "kind": kind,
+            "name": name,
+            "text": text,
+            "voice_id": voice_id.unwrap_or(""),
+            "params": params,
+            "status": "pending",
+            "error": null,
+            "file": null,
+            "created_at": now(),
+            "updated_at": null,
+        });
+        data.as_object_mut()
+            .unwrap()
+            .entry("items")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .unwrap()
+            .push(item.clone());
+        self.save_audio_raw(project, &data)?;
+        Ok(AudioItem::from_disk(&item))
+    }
+
+    pub fn delete_audio_item(&self, project: &str, item_id: &str) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let mut data = self.load_audio_raw(project)?;
+        let file_rel = data
+            .get("items")
+            .and_then(|x| x.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|it| it.get("id").and_then(|x| x.as_str()) == Some(item_id))
+                    .and_then(|it| it.get("file").and_then(|x| x.as_str()))
+                    .map(|s| s.to_string())
+            });
+        if let Some(arr) = data.get_mut("items").and_then(|x| x.as_array_mut()) {
+            arr.retain(|it| it.get("id").and_then(|x| x.as_str()) != Some(item_id));
+        }
+        self.save_audio_raw(project, &data)?;
+        if let Some(rel) = file_rel {
+            let p = self.project_dir(project)?.join(rel);
+            if p.is_file() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        Ok(())
+    }
+
+    /// Update an audio item's status (+ optional error / generated file path).
+    pub fn update_audio_status(
+        &self,
+        project: &str,
+        item_id: &str,
+        status: &str,
+        error: Option<&str>,
+        file: Option<&str>,
+    ) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let mut data = self.load_audio_raw(project)?;
+        let mut found = false;
+        if let Some(arr) = data.get_mut("items").and_then(|x| x.as_array_mut()) {
+            for it in arr.iter_mut() {
+                if it.get("id").and_then(|x| x.as_str()) == Some(item_id) {
+                    if let Some(o) = it.as_object_mut() {
+                        o.insert("status".into(), Value::String(status.to_string()));
+                        o.insert("updated_at".into(), Value::String(now()));
+                        o.insert(
+                            "error".into(),
+                            match error {
+                                Some(e) => Value::String(e.to_string()),
+                                None => Value::Null,
+                            },
+                        );
+                        if let Some(f) = file {
+                            o.insert("file".into(), Value::String(f.to_string()));
+                        }
+                    }
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            return Err(AppError::msg(format!("item audio introuvable: {item_id}")));
+        }
+        self.save_audio_raw(project, &data)
+    }
+
+    /// At startup: audio items left `running`/`queued` cannot survive a restart.
+    pub fn reset_stale_audio(&self) -> AppResult<usize> {
+        let _guard = LOCK.lock();
+        let mut count = 0usize;
+        for project in self.list_projects()? {
+            let mut data = self.load_audio_raw(&project)?;
+            let mut changed = false;
+            if let Some(arr) = data.get_mut("items").and_then(|x| x.as_array_mut()) {
+                for it in arr.iter_mut() {
+                    let st = it.get("status").and_then(|x| x.as_str()).unwrap_or("");
+                    if st == "running" || st == "queued" {
+                        if let Some(o) = it.as_object_mut() {
+                            o.insert("status".into(), Value::String("error".into()));
+                            o.insert("updated_at".into(), Value::String(now()));
+                            o.insert(
+                                "error".into(),
+                                Value::String("interrompu (redémarrage de l'app)".into()),
+                            );
+                        }
+                        changed = true;
+                        count += 1;
+                    }
+                }
+            }
+            if changed {
+                self.save_audio_raw(&project, &data)?;
+            }
+        }
+        Ok(count)
+    }
+
+    // --- voices (global catalog, voices.json) ----------------------------
+
+    pub fn list_voices(&self) -> AppResult<Vec<Voice>> {
+        let path = self.voices_path();
+        let data = Self::read_json(&path, json!({"version": 1, "voices": []}));
+        Ok(data
+            .get("voices")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().map(Voice::from_disk).collect())
+            .unwrap_or_default())
+    }
+
+    pub fn get_voice(&self, voice_id: &str) -> AppResult<Voice> {
+        self.list_voices()?
+            .into_iter()
+            .find(|v| v.voice_id == voice_id)
+            .ok_or_else(|| AppError::msg(format!("voix introuvable: {voice_id}")))
+    }
+
+    pub fn add_voice(&self, voice: &Voice) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let path = self.voices_path();
+        let mut data = Self::read_json(&path, json!({"version": 1, "voices": []}));
+        data.as_object_mut()
+            .unwrap()
+            .entry("voices")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .unwrap()
+            .push(voice.to_disk());
+        Self::write_json(&path, &data)
+    }
+
+    pub fn delete_voice(&self, voice_id: &str) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let path = self.voices_path();
+        let mut data = Self::read_json(&path, json!({"version": 1, "voices": []}));
+        if let Some(arr) = data.get_mut("voices").and_then(|x| x.as_array_mut()) {
+            arr.retain(|v| v.get("voice_id").and_then(|x| x.as_str()) != Some(voice_id));
+        }
+        Self::write_json(&path, &data)
     }
 }
 

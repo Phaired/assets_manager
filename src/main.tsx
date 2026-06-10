@@ -13,8 +13,12 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 
-import { Workspace } from "./components/Workspace";
+import { AppShell } from "./components/AppShell";
+import { Assets3dWorkspace } from "./components/Assets3dWorkspace";
+import { AudioWorkspace } from "./components/AudioWorkspace";
 import { RootLayout } from "./components/RootLayout";
+import "@fontsource-variable/archivo";
+import "@fontsource-variable/jetbrains-mono";
 import "./styles/index.css";
 
 const queryClient = new QueryClient({
@@ -38,13 +42,29 @@ const rootRoute = createRootRoute({
   component: RootLayout,
 });
 
-const indexRoute = createRoute({
+// Pathless layout route: the shared app shell (sidebar + header) wrapping both
+// sections, so the selected project survives navigation between them.
+const shellRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/",
-  component: Workspace,
+  id: "shell",
+  component: AppShell,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute]);
+const indexRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/",
+  component: Assets3dWorkspace,
+});
+
+const audioRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/audio",
+  component: AudioWorkspace,
+});
+
+const routeTree = rootRoute.addChildren([
+  shellRoute.addChildren([indexRoute, audioRoute]),
+]);
 
 const router = createRouter({
   routeTree,

@@ -74,6 +74,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const stopServer = useServerStop();
 
   const [key, setKey] = useState("");
+  const [elevenKey, setElevenKey] = useState("");
   const [model, setModel] = useState("");
   const [quality, setQuality] = useState("low");
   const [budget, setBudget] = useState("");
@@ -91,6 +92,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     const c = configQ.data;
     if (!c) return;
     setKey("");
+    setElevenKey("");
     setModel(c.openaiModel);
     setQuality(c.openaiQuality);
     setBudget(String(c.budgetUsd));
@@ -154,6 +156,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       gen3d,
     };
     if (key.trim()) patch.openaiApiKey = key.trim();
+    if (elevenKey.trim()) patch.elevenlabsApiKey = elevenKey.trim();
     if (hun) {
       const entry = (e: HunEntryForm) => ({
         dir: e.dir.trim(),
@@ -213,6 +216,21 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                       : "sk-…"
                   }
                   onChange={(e) => setKey(e.target.value)}
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="settings-eleven-key">Clé ElevenLabs (audio)</Label>
+                <Input
+                  id="settings-eleven-key"
+                  type="password"
+                  value={elevenKey}
+                  placeholder={
+                    c.elevenlabsKeySet
+                      ? "déjà configurée — laisser vide pour garder"
+                      : "votre clé ElevenLabs…"
+                  }
+                  onChange={(e) => setElevenKey(e.target.value)}
                 />
               </div>
 

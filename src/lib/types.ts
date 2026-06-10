@@ -120,6 +120,14 @@ export interface HunyuanEntryPatch {
   extraArgs?: string[];
 }
 
+export interface AudioConfig {
+  ttsModel: string;
+  ttvModel: string;
+  sfxModel: string;
+  musicModel: string;
+  outputFormat: string;
+}
+
 export interface ConfigPublic {
   openaiModel: string;
   openaiQuality: string;
@@ -129,6 +137,8 @@ export interface ConfigPublic {
   defaultBackend: "v21" | "mv2";
   workspaceDir: string;
   openaiKeySet: boolean;
+  elevenlabsKeySet: boolean;
+  audio: AudioConfig;
   gen3d: Gen3d;
   hunyuan: {
     v21: HunyuanBackendConfig;
@@ -145,9 +155,62 @@ export interface ConfigPatch {
   budgetUsd?: number;
   defaultBackend?: "v21" | "mv2";
   workspaceDir?: string;
+  elevenlabsApiKey?: string;
+  audio?: Partial<AudioConfig>;
   gen3d?: Partial<Gen3d>;
   hunyuan?: {
     v21?: HunyuanEntryPatch;
     mv2?: HunyuanEntryPatch;
   };
+}
+
+// --- Audio domain (ElevenLabs) ------------------------------------------
+
+export type AudioKind = "voice" | "sfx" | "music";
+export type AudioStatus = "pending" | "queued" | "running" | "done" | "error";
+
+/** A reusable designed voice (global catalog). */
+export interface Voice {
+  voiceId: string;
+  name: string;
+  description: string;
+  voiceSettings: Record<string, number>;
+  createdAt: string;
+}
+
+/** A Voice Design preview (played via a base64 data URL). */
+export interface VoicePreview {
+  generatedVoiceId: string;
+  audioBase64: string;
+}
+
+/** A per-project audio item. */
+export interface AudioItem {
+  id: string;
+  kind: AudioKind;
+  name: string;
+  text: string;
+  voiceId?: string;
+  params: Record<string, unknown>;
+  status: AudioStatus;
+  error: string | null;
+  /** Project-relative mp3 path (e.g. "audio/sfx/<id>.mp3"). */
+  file: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+}
+
+export interface AudioJobCurrent {
+  project: string;
+  itemId: string;
+}
+
+export interface AudioJobSnapshot {
+  current: AudioJobCurrent | null;
+  queueSize: number;
+}
+
+export interface AudioBundle {
+  items: AudioItem[];
+  jobs: AudioJobSnapshot;
 }

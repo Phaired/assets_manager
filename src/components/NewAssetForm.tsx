@@ -6,7 +6,7 @@ import type { Backend } from "../lib/types";
 import { PRESETS } from "../lib/constants";
 import { useCreateAsset } from "../lib/queries";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -62,10 +62,7 @@ export function NewAssetForm({
   }
 
   return (
-    <Card className="gap-4 py-4">
-      <CardHeader className="px-4">
-        <CardTitle className="text-sm">Nouvel asset</CardTitle>
-      </CardHeader>
+    <Card className="py-4">
       <CardContent className="px-4">
         <form className="flex flex-col gap-3" onSubmit={submit}>
           <Input
@@ -75,27 +72,27 @@ export function NewAssetForm({
             required
           />
 
-          <Select
-            value=""
-            onValueChange={applyPreset}
-          >
-            <SelectTrigger className="w-full" aria-label="Exemples de prompt">
-              <SelectValue placeholder="💡 Exemples de prompt…" />
-            </SelectTrigger>
-            <SelectContent>
-              {PRESETS.map((p) => (
-                <SelectItem key={p.name} value={p.text}>
-                  {p.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
           <Textarea
             placeholder="Description (style, couleurs, forme…)"
+            rows={3}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
           />
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-xs text-muted-foreground">Exemples :</span>
+            {PRESETS.map((p) => (
+              <button
+                key={p.name}
+                type="button"
+                onClick={() => applyPreset(p.text)}
+                title={p.text}
+                className="rounded-full border border-border bg-secondary/50 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
 
           <Select
             value={backend}

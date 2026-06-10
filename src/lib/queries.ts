@@ -10,6 +10,8 @@ import { useEffect } from "react";
 
 import * as api from "./api";
 import type {
+  AudioBundle,
+  AudioKind,
   Backend,
   ConfigPatch,
   ConfigPublic,
@@ -18,6 +20,7 @@ import type {
   ProjectBundle,
   ServerStatus,
   StageKey,
+  Voice,
 } from "./types";
 
 export const qk = {
@@ -26,6 +29,8 @@ export const qk = {
   config: ["config"] as const,
   server: ["server"] as const,
   install: ["install"] as const,
+  voices: ["voices"] as const,
+  audio: (name: string) => ["audio", name] as const,
 };
 
 // --- queries -------------------------------------------------------------
@@ -202,6 +207,95 @@ export function useServerStop() {
   });
 }
 
+// --- audio: voices (global catalog) -------------------------------------
+
+export function useVoices() {
+  return useQuery<Voice[]>({
+    queryKey: qk.voices,
+    queryFn: api.listVoices,
+  });
+}
+
+export function useDesignVoice() {
+  return useMutation({
+    mutationFn: (vars: {
+      description: string;
+      previewText: string;
+      seed?: number;
+      guidanceScale?: number;
+    }) => api.designVoice(vars),
+  });
+}
+
+export function useCreateVoice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      name: string;
+      description: string;
+      generatedVoiceId: string;
+      voiceSettings?: Record<string, number>;
+    }) => api.createVoice(vars),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.voices }),
+  });
+}
+
+export function useDeleteVoice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (voiceId: string) => api.deleteVoice(voiceId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.voices }),
+  });
+}
+
+// --- audio: items (per project) -----------------------------------------
+
+export function useAudio(project: string | null) {
+  return useQuery<AudioBundle>({
+    queryKey: qk.audio(project ?? "__none__"),
+    queryFn: () => api.listAudio(project as string),
+    enabled: !!project,
+  });
+}
+
+export function useCreateAudioItem(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      kind: AudioKind;
+      name: string;
+      text: string;
+      voiceId?: string | null;
+      params?: Record<string, unknown>;
+    }) => api.createAudioItem({ project: project as string, ...vars }),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.audio(project) });
+    },
+  });
+}
+
+export function useGenerateAudioItem(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (itemId: string) =>
+      api.generateAudioItem(project as string, itemId),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.audio(project) });
+    },
+  });
+}
+
+export function useDeleteAudioItem(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (itemId: string) =>
+      api.deleteAudioItem(project as string, itemId),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.audio(project) });
+    },
+  });
+}
+
 // --- guided Hunyuan installer -------------------------------------------
 
 export function useInstallStatus() {
@@ -265,6 +359,8 @@ export function useEventBridge(qc: QueryClient) {
       .onProjectChanged((name) => {
         qc.invalidateQueries({ queryKey: qk.project(name) });
         qc.invalidateQueries({ queryKey: qk.projects });
+        // Audio items live under a separate query key for the same project.
+        qc.invalidateQueries({ queryKey: qk.audio(name) });
       })
       .then((u) => {
         if (active) unlistens.push(u);

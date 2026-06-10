@@ -111,6 +111,14 @@ pub fn defaults() -> Value {
         "budget_usd": 5.0,
         "estimated_cost_per_image": 0.063,
         "default_backend": "v21",
+        "elevenlabs_api_key": "",
+        "audio": {
+            "tts_model": "eleven_multilingual_v2",
+            "ttv_model": "eleven_multilingual_ttv_v2",
+            "sfx_model": "eleven_text_to_sound_v2",
+            "music_model": "music_v1",
+            "output_format": "mp3_44100_128"
+        },
         "gen3d": {
             "target_face_num": 20000,
             "octree_resolution": 256,
@@ -244,6 +252,23 @@ pub fn openai_key(config: &Value) -> String {
         return from_cfg;
     }
     std::env::var("OPENAI_API_KEY")
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// ElevenLabs key = config key (trimmed) or `$ELEVENLABS_API_KEY` (trimmed).
+pub fn elevenlabs_key(config: &Value) -> String {
+    let from_cfg = config
+        .get("elevenlabs_api_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !from_cfg.is_empty() {
+        return from_cfg;
+    }
+    std::env::var("ELEVENLABS_API_KEY")
         .unwrap_or_default()
         .trim()
         .to_string()

@@ -6,6 +6,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
   Asset,
+  AudioBundle,
+  AudioItem,
+  AudioKind,
   Backend,
   ConfigPatch,
   ConfigPublic,
@@ -17,6 +20,8 @@ import type {
   ProjectBundle,
   ServerStatus,
   StageKey,
+  Voice,
+  VoicePreview,
 } from "./types";
 
 // --- commands ------------------------------------------------------------
@@ -170,6 +175,93 @@ export async function assetFileUrl(
   rel: string,
 ): Promise<string> {
   const abs = await assetFileSrc(project, assetId, rel);
+  return convertFileSrc(abs);
+}
+
+// --- audio: voices (global catalog) --------------------------------------
+
+/** Voice Design: returns preview voices to listen to and pick from. */
+export function designVoice(args: {
+  description: string;
+  previewText: string;
+  seed?: number;
+  guidanceScale?: number;
+}): Promise<VoicePreview[]> {
+  return invoke<VoicePreview[]>("design_voice", args);
+}
+
+/** Save a chosen design preview as a reusable voice. */
+export function createVoice(args: {
+  name: string;
+  description: string;
+  generatedVoiceId: string;
+  voiceSettings?: Record<string, number>;
+}): Promise<Voice> {
+  return invoke<Voice>("create_voice", args);
+}
+
+export function listVoices(): Promise<Voice[]> {
+  return invoke<Voice[]>("list_voices");
+}
+
+export function deleteVoice(voiceId: string): Promise<void> {
+  return invoke<void>("delete_voice", { voiceId });
+}
+
+// --- audio: items (per project) ------------------------------------------
+
+export function listAudio(project: string): Promise<AudioBundle> {
+  return invoke<AudioBundle>("list_audio", { project });
+}
+
+export function createAudioItem(args: {
+  project: string;
+  kind: AudioKind;
+  name: string;
+  text: string;
+  voiceId?: string | null;
+  params?: Record<string, unknown>;
+}): Promise<AudioItem> {
+  return invoke<AudioItem>("create_audio_item", args);
+}
+
+export function generateAudioItem(
+  project: string,
+  itemId: string,
+): Promise<void> {
+  return invoke<void>("generate_audio_item", { project, itemId });
+}
+
+export function deleteAudioItem(
+  project: string,
+  itemId: string,
+): Promise<void> {
+  return invoke<void>("delete_audio_item", { project, itemId });
+}
+
+/** Resolve a project-relative file to an absolute (confined) path. */
+export function projectFileSrc(
+  project: string,
+  rel: string,
+): Promise<string> {
+  return invoke<string>("project_file_src", { project, rel });
+}
+
+/** Copy a project-relative file to a user-chosen absolute destination. */
+export function saveProjectFile(
+  project: string,
+  rel: string,
+  dest: string,
+): Promise<void> {
+  return invoke<void>("save_project_file", { project, rel, dest });
+}
+
+/** Resolve a project-relative file to a webview-loadable URL. */
+export async function projectFileUrl(
+  project: string,
+  rel: string,
+): Promise<string> {
+  const abs = await projectFileSrc(project, rel);
   return convertFileSrc(abs);
 }
 

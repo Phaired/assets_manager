@@ -2,8 +2,10 @@
 //! config, store (projects/assets/state JSON), job queue, Hunyuan supervisor and
 //! the Python worker sidecar. Frontend talks to it via `invoke` / `listen`.
 
+mod audio_jobs;
 mod commands;
 mod config;
+mod elevenlabs;
 mod error;
 mod events;
 mod installer;
@@ -18,7 +20,9 @@ use std::time::Duration;
 
 use tauri::Manager;
 
+use crate::audio_jobs::AudioJobManager;
 use crate::config::Config;
+use crate::elevenlabs::ElevenLabs;
 use crate::installer::Installer;
 use crate::jobs::JobManager;
 use crate::store::Store;
@@ -41,11 +45,20 @@ pub fn run() {
         Arc::clone(&supervisor),
         Arc::clone(&worker),
     );
+    let elevenlabs = Arc::new(
+        ElevenLabs::new().expect("failed to build ElevenLabs HTTP client"),
+    );
+    let audio_jobs = AudioJobManager::new(
+        Arc::clone(&store),
+        Arc::clone(&config),
+        Arc::clone(&elevenlabs),
+    );
 
     // Clones moved into setup / exit handlers.
     let worker_for_setup = Arc::clone(&worker);
     let supervisor_for_tick = Arc::clone(&supervisor);
     let jobs_for_setup = Arc::clone(&jobs);
+    let audio_jobs_for_setup = Arc::clone(&audio_jobs);
     let store_for_setup = Arc::clone(&store);
 
     let worker_for_exit = Arc::clone(&worker);
@@ -61,6 +74,8 @@ pub fn run() {
         .manage(Arc::clone(&installer))
         .manage(Arc::clone(&worker))
         .manage(Arc::clone(&jobs))
+        .manage(Arc::clone(&elevenlabs))
+        .manage(Arc::clone(&audio_jobs))
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -94,9 +109,13 @@ pub fn run() {
             if let Err(e) = store_for_setup.reset_stale_stages() {
                 eprintln!("reset_stale_stages: {e}");
             }
+            if let Err(e) = store_for_setup.reset_stale_audio() {
+                eprintln!("reset_stale_audio: {e}");
+            }
 
-            // Wire AppHandle into the job manager so it can emit events.
+            // Wire AppHandle into the job managers so they can emit events.
             jobs_for_setup.set_app(handle.clone());
+            audio_jobs_for_setup.set_app(handle.clone());
 
             // Spawn the Python worker sidecar at startup (non-blocking).
             let worker_setup = Arc::clone(&worker_for_setup);
@@ -141,6 +160,16 @@ pub fn run() {
             commands::cancel_install,
             commands::asset_file_src,
             commands::save_asset_file,
+            commands::design_voice,
+            commands::create_voice,
+            commands::list_voices,
+            commands::delete_voice,
+            commands::list_audio,
+            commands::create_audio_item,
+            commands::generate_audio_item,
+            commands::delete_audio_item,
+            commands::project_file_src,
+            commands::save_project_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

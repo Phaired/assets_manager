@@ -1,4 +1,4 @@
-import type { StageKey } from "./types";
+import type { AudioKind, AudioStatus, StageKey } from "./types";
 
 export interface StageDef {
   key: StageKey;
@@ -27,6 +27,32 @@ export const STAGES: StageDef[] = [
 export const ALL_STAGES: StageKey[] = ["multiview", "model3d", "export"];
 
 export const VIEW_FILES = ["front", "back", "left", "right"] as const;
+
+// --- audio --------------------------------------------------------------
+
+export const AUDIO_KIND_LABELS: Record<AudioKind, string> = {
+  voice: "Voix",
+  sfx: "Son (SFX)",
+  music: "Musique",
+};
+
+/** Status dot color classes (shared by the audio list + detail). */
+export const AUDIO_STATUS_COLOR: Record<AudioStatus, string> = {
+  pending: "bg-muted-foreground/40",
+  queued: "bg-run",
+  running: "bg-run animate-pulse",
+  done: "bg-ok",
+  error: "bg-destructive",
+};
+
+/** Per-kind accent hue (hex) — drives the player glow, icon chips and EQ bars.
+ *  Deliberately distinct from the app's blue (#6ea8fe) and from each other so
+ *  the three kinds read at a glance. */
+export const AUDIO_KIND_ACCENT: Record<AudioKind, string> = {
+  voice: "#fb7185", // rose
+  sfx: "#38bdf8", // cyan
+  music: "#34d399", // emerald
+};
 
 // Prompts d'exemple — meme style que tools/brainrot_manifest.py : syntagme nominal
 // anglais, concis et concret (type de creature + couleurs/matieres/accessoires),

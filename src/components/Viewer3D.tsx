@@ -211,7 +211,7 @@ export function Viewer3D({
             onChange={(e) => setBrightness(parseFloat(e.target.value))}
             onDoubleClick={() => setBrightness(1.3)}
             title="Glisser pour ajuster · double-clic pour réinitialiser"
-            style={{ width: 90, cursor: "pointer", accentColor: "#f5b942" }}
+            style={{ width: 90, cursor: "pointer", accentColor: "#e39a4a" }}
           />
         </label>
       </div>
@@ -222,12 +222,12 @@ export function Viewer3D({
         camera={{ position: [2.4, 1.8, 2.4], fov: 45, near: 0.01, far: 100 }}
         gl={{ antialias: true, preserveDrawingBuffer: true }}
       >
-        <color attach="background" args={["#15171d"]} />
+        <color attach="background" args={["#171411"]} />
         <ExposureControl value={brightness} />
         {/* Local lights only — no <Environment preset> (it fetches a remote HDR,
             which stalls offline / in the packaged app). */}
         <ambientLight intensity={0.45 * brightness} />
-        <hemisphereLight intensity={0.6 * brightness} groundColor="#0b0d12" />
+        <hemisphereLight intensity={0.6 * brightness} groundColor="#0f0c09" />
         <directionalLight
           position={[5, 8, 5]}
           intensity={1.1 * brightness}
@@ -271,10 +271,10 @@ export function Viewer3D({
             position={[0, -0.001, 0]}
             cellSize={0.25}
             cellThickness={0.6}
-            cellColor="#2b3039"
+            cellColor="#332c23"
             sectionSize={1}
             sectionThickness={1}
-            sectionColor="#3a4150"
+            sectionColor="#4a4033"
             fadeDistance={18}
             fadeStrength={1.5}
             infiniteGrid

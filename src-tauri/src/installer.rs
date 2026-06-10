@@ -85,6 +85,13 @@ struct Recipe {
     /// Model weights to pre-fetch into the HF cache (so the first generation does
     /// not silently hang on a multi-GB download).
     weights: &'static [Weights],
+    /// pip constraints applied to the (unpinned) repo `requirements.txt`. The
+    /// Hunyuan repos pin NOTHING, so without these uv resolves the LATEST of
+    /// transformers/diffusers/numpy/etc — which require a newer torch than our
+    /// pinned build (e.g. transformers 5.x dereferences `torch.float8_e8m0fnu`,
+    /// added only in torch 2.7, and crashes on import against torch 2.5.1).
+    /// These keep the dependency resolution compatible with the pinned tuple.
+    constraints: &'static [&'static str],
 
     // --- final config fields (mirror `config::defaults` for this backend) ----
     script: &'static str,
@@ -136,6 +143,26 @@ const RECIPE_MV2: Recipe = Recipe {
                 "hunyuan3d-vae-v2-0/*",
             ],
         },
+    ],
+    // Pinned to the canonical Hunyuan3D-2 set that is ABI/API-compatible with
+    // torch 2.5.1 + cu124. Bump only together with `torch_packages` (and rebuild
+    // the ext_wheels). numpy<2 also matches the prebuilt extension wheels' ABI.
+    constraints: &[
+        "transformers==4.46.2",
+        "tokenizers==0.20.3",
+        // transformers 4.46 hard-requires huggingface_hub<1.0; this is the lever
+        // that also caps gradio (see below). 0.36.2 is the newest <1.0 release.
+        "huggingface_hub==0.36.2",
+        "diffusers==0.30.0",
+        "numpy==1.26.4",
+        // gradio is used purely as an API server here (worker calls /generation_all
+        // via gradio_client; supervisor probes /gradio_api/info) — the web UI is
+        // never shown. So pick by API compatibility, not UI: gradio 6 requires
+        // huggingface_hub>=1.0, which conflicts with transformers above, so gradio
+        // 5.x is the ceiling. 5.50.0 is the newest gradio 5; it exposes the
+        // /gradio_api/ routes the supervisor + the worker's gradio_client expect
+        // (gradio 4 lacks that prefix → 404 on the health probe).
+        "gradio==5.50.0",
     ],
     script: "gradio_app.py",
     host: "127.0.0.1",
@@ -383,6 +410,12 @@ impl Installer {
         // 6. deps (repo requirements + huggingface_hub) --------------------
         self.phase(app, "deps", 50, "Installation des dépendances Python…");
         if !is_done(&markers, "deps") {
+            // Write the version pins as a pip constraints file, applied to BOTH
+            // installs below so the repo's unpinned requirements can't pull a
+            // transformers/numpy/etc that is incompatible with the pinned torch.
+            let constraints_path = install_dir.join("_constraints.txt");
+            std::fs::write(&constraints_path, recipe.constraints.join("\n"))?;
+
             let req = install_dir.join("requirements.txt");
             if req.is_file() {
                 let mut c = Command::new(&uv);
@@ -390,6 +423,8 @@ impl Installer {
                     .arg("install")
                     .arg("--python")
                     .arg(&venv_python)
+                    .arg("--constraint")
+                    .arg(&constraints_path)
                     .arg("-r")
                     .arg(&req);
                 self.run(app, c, &log_path)?;
@@ -397,12 +432,15 @@ impl Installer {
                 self.log_line(&log_path, "requirements.txt absent du repo — étape deps ignorée.");
             }
             // huggingface_hub is needed for the weights pre-fetch (and usually a
-            // transitive dep already; install explicitly to be safe).
+            // transitive dep already; install explicitly to be safe). Same
+            // constraints so it can't drift to an incompatible 1.x.
             let mut c = Command::new(&uv);
             c.arg("pip")
                 .arg("install")
                 .arg("--python")
                 .arg(&venv_python)
+                .arg("--constraint")
+                .arg(&constraints_path)
                 .arg("huggingface_hub");
             self.run(app, c, &log_path)?;
             mark_done(&markers, "deps")?;
@@ -421,7 +459,16 @@ impl Installer {
                 );
             } else {
                 for (i, w) in recipe.ext_wheels.iter().enumerate() {
-                    let dest = install_dir.join(format!("_ext_{i}.whl"));
+                    // Keep the real wheel filename from the URL — pip/uv reject a
+                    // name that isn't `{name}-{version}-…whl`.
+                    let fname = w
+                        .url
+                        .rsplit('/')
+                        .next()
+                        .filter(|s| s.ends_with(".whl"))
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("ext_{i}.whl"));
+                    let dest = install_dir.join(&fname);
                     self.download(app, w.url, &dest, w.sha256, 65, 70)?;
                     let mut c = Command::new(&uv);
                     c.arg("pip")

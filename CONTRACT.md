@@ -252,6 +252,30 @@ defaults. `save_config` writes the full merge atomically. `openai_key` = config 
   but production-grade, not generic. Strong visual hierarchy, smooth state transitions,
   good empty/loading/error states, accessible.
 
+## Audio domain (ElevenLabs) — added after the 3D contract
+
+Audio generation (sons / voix / musiques) is **all-Rust** (no Python worker): Rust calls
+`api.elevenlabs.io` directly via `reqwest::blocking` (`src-tauri/src/elevenlabs.rs`). Voices are
+**sur-mesure only** (Voice Design → TTS). Audio lives in the **same projects** as 3D (different
+UI tab), per-project on disk; designed voices are a **global** catalog.
+
+Disk: `<workspace>/<project>/audio.json` (manifest) + `<workspace>/<project>/audio/{voice,sfx,music}/<id>.mp3`;
+global `<data_root>/voices.json`. The 3D files (project.json/state.json/…) are untouched.
+
+Bridge types (camelCase): `Voice {voiceId,name,description,voiceSettings,createdAt}`,
+`VoicePreview {generatedVoiceId,audioBase64}`,
+`AudioItem {id,kind:"voice"|"sfx"|"music",name,text,voiceId?,params,status,error,file,createdAt,updatedAt}`,
+`AudioBundle {items,jobs:{current,queueSize}}`. Config gains `elevenlabsKeySet` + `audio`
+(tts/ttv/sfx/music model + outputFormat); key from config or `$ELEVENLABS_API_KEY`.
+
+Commands: `design_voice`, `create_voice`, `list_voices`, `delete_voice`; `list_audio`,
+`create_audio_item`, `generate_audio_item`, `delete_audio_item`; `project_file_src` /
+`save_project_file` (project-relative, workspace-confined — for mp3 playback/download).
+Generation runs on a dedicated serial executor (`audio_jobs.rs`), independent of the GPU job
+queue, and emits `project-changed` (the frontend also invalidates the `["audio", project]`
+query). ElevenLabs endpoints: `/text-to-voice/design`, `/text-to-voice`,
+`/text-to-speech/{voiceId}`, `/sound-generation`, `/music` (model `music_v1`).
+
 ## Capabilities / security
 - Enable `core:event`, `core:window`, dialog/fs/opener as needed.
 - Asset protocol: allow reading from `workspace_dir` so `convertFileSrc` can load

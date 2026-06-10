@@ -279,6 +279,50 @@ pub struct HunyuanPublic {
 
 // --- ConfigPublic -------------------------------------------------------
 
+/// Audio (ElevenLabs) defaults surfaced to the UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioConfigPublic {
+    pub tts_model: String,
+    pub ttv_model: String,
+    pub sfx_model: String,
+    pub music_model: String,
+    pub output_format: String,
+}
+
+impl AudioConfigPublic {
+    pub fn from_config(cfg: &Value) -> Self {
+        let a = cfg.get("audio").cloned().unwrap_or(Value::Null);
+        AudioConfigPublic {
+            tts_model: a
+                .get("tts_model")
+                .and_then(|x| x.as_str())
+                .unwrap_or("eleven_multilingual_v2")
+                .to_string(),
+            ttv_model: a
+                .get("ttv_model")
+                .and_then(|x| x.as_str())
+                .unwrap_or("eleven_multilingual_ttv_v2")
+                .to_string(),
+            sfx_model: a
+                .get("sfx_model")
+                .and_then(|x| x.as_str())
+                .unwrap_or("eleven_text_to_sound_v2")
+                .to_string(),
+            music_model: a
+                .get("music_model")
+                .and_then(|x| x.as_str())
+                .unwrap_or("music_v1")
+                .to_string(),
+            output_format: a
+                .get("output_format")
+                .and_then(|x| x.as_str())
+                .unwrap_or("mp3_44100_128")
+                .to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigPublic {
@@ -290,12 +334,14 @@ pub struct ConfigPublic {
     pub default_backend: String,
     pub workspace_dir: String,
     pub openai_key_set: bool,
+    pub elevenlabs_key_set: bool,
+    pub audio: AudioConfigPublic,
     pub gen3d: Gen3d,
     pub hunyuan: HunyuanPublic,
 }
 
 impl ConfigPublic {
-    pub fn from_config(cfg: &Value, key_set: bool) -> Self {
+    pub fn from_config(cfg: &Value, key_set: bool, elevenlabs_key_set: bool) -> Self {
         let gen3d_v = cfg.get("gen3d").cloned().unwrap_or(Value::Null);
         let hun = cfg.get("hunyuan").cloned().unwrap_or(Value::Null);
         ConfigPublic {
@@ -314,6 +360,8 @@ impl ConfigPublic {
                 .to_string(),
             workspace_dir: str_field(cfg, "workspace_dir"),
             openai_key_set: key_set,
+            elevenlabs_key_set,
+            audio: AudioConfigPublic::from_config(cfg),
             gen3d: Gen3d::from_config(&gen3d_v),
             hunyuan: HunyuanPublic {
                 v21: hunyuan_entry(&hun, "v21"),
@@ -402,6 +450,39 @@ pub struct HunyuanPatch {
     pub mv2: Option<HunyuanEntryPatch>,
 }
 
+/// Patch for the audio (ElevenLabs) model defaults. Every field optional.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPatch {
+    pub tts_model: Option<String>,
+    pub ttv_model: Option<String>,
+    pub sfx_model: Option<String>,
+    pub music_model: Option<String>,
+    pub output_format: Option<String>,
+}
+
+impl AudioPatch {
+    fn to_snake_object(&self) -> serde_json::Map<String, Value> {
+        let mut o = serde_json::Map::new();
+        if let Some(v) = &self.tts_model {
+            o.insert("tts_model".into(), Value::String(v.clone()));
+        }
+        if let Some(v) = &self.ttv_model {
+            o.insert("ttv_model".into(), Value::String(v.clone()));
+        }
+        if let Some(v) = &self.sfx_model {
+            o.insert("sfx_model".into(), Value::String(v.clone()));
+        }
+        if let Some(v) = &self.music_model {
+            o.insert("music_model".into(), Value::String(v.clone()));
+        }
+        if let Some(v) = &self.output_format {
+            o.insert("output_format".into(), Value::String(v.clone()));
+        }
+        o
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigPatch {
@@ -413,6 +494,8 @@ pub struct ConfigPatch {
     pub budget_usd: Option<f64>,
     pub default_backend: Option<String>,
     pub workspace_dir: Option<String>,
+    pub elevenlabs_api_key: Option<String>,
+    pub audio: Option<AudioPatch>,
     pub gen3d: Option<Gen3dPatch>,
     pub hunyuan: Option<HunyuanPatch>,
 }
@@ -445,6 +528,12 @@ impl ConfigPatch {
         }
         if let Some(v) = &self.workspace_dir {
             obj.insert("workspace_dir".into(), Value::String(v.clone()));
+        }
+        if let Some(v) = &self.elevenlabs_api_key {
+            obj.insert("elevenlabs_api_key".into(), Value::String(v.clone()));
+        }
+        if let Some(a) = &self.audio {
+            obj.insert("audio".into(), Value::Object(a.to_snake_object()));
         }
         if let Some(g) = &self.gen3d {
             obj.insert("gen3d".into(), Value::Object(g.to_snake_object()));
@@ -491,6 +580,137 @@ fn hunyuan_entry_override(e: &HunyuanEntryPatch) -> Value {
         );
     }
     Value::Object(o)
+}
+
+// --- Audio domain (ElevenLabs) ------------------------------------------
+
+/// A reusable designed voice (global catalog, `voices.json`). Stored snake_case
+/// on disk; exposed camelCase over the bridge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Voice {
+    pub voice_id: String,
+    pub name: String,
+    pub description: String,
+    /// ElevenLabs voice_settings (stability, similarity_boost, …) as a JSON object.
+    pub voice_settings: Value,
+    pub created_at: String,
+}
+
+impl Voice {
+    pub fn from_disk(v: &Value) -> Self {
+        Voice {
+            voice_id: str_field(v, "voice_id"),
+            name: str_field(v, "name"),
+            description: str_field(v, "description"),
+            voice_settings: v
+                .get("voice_settings")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default())),
+            created_at: str_field(v, "created_at"),
+        }
+    }
+
+    /// Snake_case JSON for `voices.json`.
+    pub fn to_disk(&self) -> Value {
+        serde_json::json!({
+            "voice_id": self.voice_id,
+            "name": self.name,
+            "description": self.description,
+            "voice_settings": self.voice_settings,
+            "created_at": self.created_at,
+        })
+    }
+}
+
+/// One Voice Design preview returned to the UI (played via a base64 data URL).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoicePreview {
+    pub generated_voice_id: String,
+    pub audio_base_64: String,
+}
+
+/// A per-project audio item (one entry of `audio.json`). Stored snake_case on
+/// disk; exposed camelCase over the bridge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioItem {
+    pub id: String,
+    /// "voice" | "sfx" | "music".
+    pub kind: String,
+    pub name: String,
+    /// TTS text / SFX prompt / music prompt.
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice_id: Option<String>,
+    /// Kind-specific params (durationSeconds, promptInfluence, loop, musicLengthMs…).
+    pub params: Value,
+    pub status: String,
+    pub error: Option<String>,
+    /// Project-relative path of the generated mp3 (e.g. "audio/sfx/<id>.mp3").
+    pub file: Option<String>,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+}
+
+impl AudioItem {
+    pub fn from_disk(v: &Value) -> Self {
+        AudioItem {
+            id: str_field(v, "id"),
+            kind: str_field(v, "kind"),
+            name: str_field(v, "name"),
+            text: str_field(v, "text"),
+            voice_id: v
+                .get("voice_id")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            params: v
+                .get("params")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default())),
+            status: v
+                .get("status")
+                .and_then(|x| x.as_str())
+                .unwrap_or("pending")
+                .to_string(),
+            error: v.get("error").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            file: v
+                .get("file")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            created_at: str_field(v, "created_at"),
+            updated_at: v
+                .get("updated_at")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
+        }
+    }
+}
+
+/// Currently-running audio job (single serial executor).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioJobCurrent {
+    pub project: String,
+    pub item_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioJobSnapshot {
+    pub current: Option<AudioJobCurrent>,
+    pub queue_size: usize,
+}
+
+/// What `list_audio` returns: a project's items + the audio queue snapshot.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioBundle {
+    pub items: Vec<AudioItem>,
+    pub jobs: AudioJobSnapshot,
 }
 
 // --- small helpers ------------------------------------------------------
