@@ -261,6 +261,7 @@ def reduce_textured_glb(source: Path, destination: Path, target_faces: int) -> t
     import pymeshlab
     import trimesh
     from PIL import Image
+    from trimesh.visual.material import PBRMaterial
     from trimesh.visual.texture import TextureVisuals
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -293,7 +294,17 @@ def reduce_textured_glb(source: Path, destination: Path, target_faces: int) -> t
         vertices = source_vertices[corner_indices]
         faces = np.arange(len(corner_indices), dtype=np.int64).reshape(-1, 3)
         uv = mesh.wedge_tex_coord_matrix().reshape(-1, 2).copy()
-        visual = TextureVisuals(uv=uv, image=texture)
+        # Explicit PBR material with WHITE baseColorFactor. Without a material,
+        # trimesh assigns its default gray (baseColorFactor=[102,102,102,255]=0.4),
+        # which multiplies the albedo by 0.4 in every viewer/Roblox -> assets render
+        # at 40% brightness. White factor shows the full baked texture.
+        material = PBRMaterial(
+            baseColorTexture=texture,
+            baseColorFactor=[255, 255, 255, 255],
+            metallicFactor=0.0,
+            roughnessFactor=1.0,
+        )
+        visual = TextureVisuals(uv=uv, image=texture, material=material)
         reduced = trimesh.Trimesh(vertices=vertices, faces=faces, visual=visual, process=False)
         reduced.export(reduced_path)
         faces_n, textures_n = face_and_texture_count(reduced_path)

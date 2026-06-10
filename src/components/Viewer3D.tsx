@@ -7,7 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import {
   OrbitControls,
   Grid,
@@ -24,6 +24,7 @@ import {
   RefreshCw,
   Loader2,
   AlertTriangle,
+  Sun,
 } from "lucide-react";
 import type { ComponentRef } from "react";
 
@@ -63,7 +64,8 @@ function Model({
     return { scene: cloned, stats: { faces: Math.round(faces), vertices } };
   }, [gltf.scene]);
 
-  // Apply wireframe to all standard materials.
+  // Apply wireframe + an emissive floor (the texture lights itself a bit so shadow
+  // sides are never black) to all standard materials.
   useEffect(() => {
     scene.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
@@ -72,7 +74,16 @@ function Model({
           ? mesh.material
           : [mesh.material];
         for (const m of mats) {
-          (m as THREE.MeshStandardMaterial).wireframe = wireframe;
+          const sm = m as THREE.MeshStandardMaterial;
+          sm.wireframe = wireframe;
+          if (sm.map) {
+            // Self-illuminate from the albedo so the model always reads bright,
+            // independent of scene lighting (good for vivid game/Roblox previews).
+            sm.emissiveMap = sm.map;
+            sm.emissive = new THREE.Color(0xffffff);
+            sm.emissiveIntensity = 0.35;
+            sm.needsUpdate = true;
+          }
         }
       }
     });
@@ -89,6 +100,18 @@ function Model({
       </Center>
     </Bounds>
   );
+}
+
+/** Drives renderer tone-mapping exposure (the most effective brightness lever).
+    Neutral tone mapping avoids ACES's mid-tone darkening, so the slider has real
+    range. */
+function ExposureControl({ value }: { value: number }) {
+  const gl = useThree((s) => s.gl);
+  useEffect(() => {
+    gl.toneMapping = THREE.NeutralToneMapping;
+    gl.toneMappingExposure = value;
+  }, [gl, value]);
+  return null;
 }
 
 function CanvasLoader() {
@@ -130,6 +153,7 @@ export function Viewer3D({
   const [wireframe, setWireframe] = useState(false);
   const [autoRotate, setAutoRotate] = useState(true);
   const [grid, setGrid] = useState(true);
+  const [brightness, setBrightness] = useState(1.3);
   const [stats, setStats] = useState<MeshStats | null>(null);
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
 
@@ -172,6 +196,24 @@ export function Viewer3D({
         <button className="vbtn" onClick={resetCamera} title="Recentrer">
           <RotateCcw size={14} /> Recadrer
         </button>
+        <label
+          className="vbtn vslider"
+          title={`Luminosité ×${brightness.toFixed(2)}`}
+          style={{ display: "flex", alignItems: "center", gap: 6, cursor: "default" }}
+        >
+          <Sun size={14} />
+          <input
+            type="range"
+            min={0.3}
+            max={4}
+            step={0.05}
+            value={brightness}
+            onChange={(e) => setBrightness(parseFloat(e.target.value))}
+            onDoubleClick={() => setBrightness(1.3)}
+            title="Glisser pour ajuster · double-clic pour réinitialiser"
+            style={{ width: 90, cursor: "pointer", accentColor: "#f5b942" }}
+          />
+        </label>
       </div>
 
       <Canvas
@@ -181,17 +223,18 @@ export function Viewer3D({
         gl={{ antialias: true, preserveDrawingBuffer: true }}
       >
         <color attach="background" args={["#15171d"]} />
+        <ExposureControl value={brightness} />
         {/* Local lights only — no <Environment preset> (it fetches a remote HDR,
             which stalls offline / in the packaged app). */}
-        <ambientLight intensity={0.45} />
-        <hemisphereLight intensity={0.6} groundColor="#0b0d12" />
+        <ambientLight intensity={0.45 * brightness} />
+        <hemisphereLight intensity={0.6 * brightness} groundColor="#0b0d12" />
         <directionalLight
           position={[5, 8, 5]}
-          intensity={1.1}
+          intensity={1.1 * brightness}
           castShadow
           shadow-mapSize={[1024, 1024]}
         />
-        <directionalLight position={[-5, 3, -4]} intensity={0.35} />
+        <directionalLight position={[-5, 3, -4]} intensity={0.35 * brightness} />
 
         <Suspense fallback={<CanvasLoader />}>
           {src ? (
