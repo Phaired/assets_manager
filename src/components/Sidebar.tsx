@@ -1,10 +1,33 @@
 import { useEffect, useState } from "react";
 import { Plus, FolderPlus, Loader2, Check } from "lucide-react";
+import { toast } from "sonner";
 
 import type { ProjectBundle, StageStatus } from "../lib/types";
 import { STAGES } from "../lib/constants";
 import { useCreateProject, useSetProjectStyle } from "../lib/queries";
 import { NewAssetForm } from "./NewAssetForm";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { cn } from "@/lib/utils";
+
+/** Maps a stage status to the dot color class. */
+const DOT_COLOR: Record<StageStatus, string> = {
+  pending: "bg-muted-foreground/40",
+  queued: "bg-run",
+  running: "bg-run animate-pulse",
+  done: "bg-ok",
+  error: "bg-destructive",
+};
 
 /** Free-text style for the whole project — injected into every asset's image
  *  prompt. Saved on blur (or Ctrl/Cmd+Enter). */
@@ -36,19 +59,18 @@ function ProjectStyleField({
   }
 
   return (
-    <div className="project-style">
-      <label className="field-label" htmlFor="project-style">
+    <div className="flex flex-col gap-1.5">
+      <Label htmlFor="project-style" className="text-muted-foreground">
         Style du projet
-        {setStyle.isPending && <Loader2 size={12} className="spin" />}
+        {setStyle.isPending && <Loader2 size={12} className="animate-spin" />}
         {saved && !setStyle.isPending && (
-          <span className="saved-hint">
+          <span className="flex items-center gap-1 text-ok">
             <Check size={12} /> enregistré
           </span>
         )}
-      </label>
-      <textarea
+      </Label>
+      <Textarea
         id="project-style"
-        className="input"
         rows={2}
         placeholder="ex. low-poly, couleurs vives, matériaux mats…"
         value={value}
@@ -108,66 +130,77 @@ export function Sidebar({
     const p = await createProject.mutateAsync(name);
     setNewProjectName("");
     setCreatingProject(false);
+    toast.success(`Projet « ${p.name} » créé`);
     onSelectProject(p.name);
   }
 
   return (
-    <aside className="sidebar">
-      <div className="sidebar-section">
-        <label className="field-label" htmlFor="project-select">
+    <aside className="flex w-80 shrink-0 flex-col gap-4 border-r border-border bg-card p-4">
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="project-select" className="text-muted-foreground">
           Projet
-        </label>
-        <div className="row">
-          <select
-            id="project-select"
-            className="input"
+        </Label>
+        <div className="flex items-center gap-2">
+          <Select
             value={project ?? ""}
             disabled={!projects.length}
-            onChange={(e) => onSelectProject(e.target.value)}
+            onValueChange={onSelectProject}
           >
-            {!projects.length && <option value="">Aucun projet</option>}
-            {projects.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </select>
-          <button
-            className="btn icon"
+            <SelectTrigger
+              id="project-select"
+              className="w-full"
+              aria-label="Projet"
+            >
+              <SelectValue placeholder="Aucun projet" />
+            </SelectTrigger>
+            <SelectContent>
+              {projects.map((p) => (
+                <SelectItem key={p} value={p}>
+                  {p}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="shrink-0"
             title="Nouveau projet"
+            aria-label="Nouveau projet"
             onClick={() => setCreatingProject((v) => !v)}
             aria-expanded={creatingProject}
           >
             <FolderPlus size={16} />
-          </button>
+          </Button>
         </div>
 
         {creatingProject && (
           <form
-            className="inline-create"
+            className="flex items-center gap-2"
             onSubmit={(e) => {
               e.preventDefault();
               submitNewProject();
             }}
           >
-            <input
-              className="input"
+            <Input
               autoFocus
               placeholder="Nom du projet…"
               value={newProjectName}
               onChange={(e) => setNewProjectName(e.target.value)}
             />
-            <button
+            <Button
               type="submit"
-              className="btn"
+              size="icon"
+              className="shrink-0"
+              aria-label="Créer le projet"
               disabled={createProject.isPending || !newProjectName.trim()}
             >
               {createProject.isPending ? (
-                <Loader2 size={14} className="spin" />
+                <Loader2 size={14} className="animate-spin" />
               ) : (
                 <Plus size={14} />
               )}
-            </button>
+            </Button>
           </form>
         )}
 
@@ -176,51 +209,74 @@ export function Sidebar({
         )}
       </div>
 
-      <div className="sidebar-section grow">
-        <div className="section-head">
-          <span className="field-label">Assets</span>
-          <span className="muted small">{assets.length}</span>
+      <div className="flex min-h-0 grow flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium text-muted-foreground">
+            Assets
+          </span>
+          <span className="text-xs text-muted-foreground">{assets.length}</span>
         </div>
 
-        <div className="asset-list">
+        <div className="flex min-h-0 grow flex-col gap-1 overflow-y-auto">
           {loading && !bundle && (
-            <div className="list-skeleton">
-              <span className="skeleton-row" />
-              <span className="skeleton-row" />
-              <span className="skeleton-row" />
+            <div className="flex flex-col gap-1">
+              <Skeleton className="h-9 w-full" />
+              <Skeleton className="h-9 w-full" />
+              <Skeleton className="h-9 w-full" />
             </div>
           )}
           {!loading && !project && (
-            <p className="muted empty-hint">Aucun projet.</p>
+            <p className="px-1 py-2 text-sm text-muted-foreground">
+              Aucun projet.
+            </p>
           )}
           {project && !assets.length && (
-            <p className="muted empty-hint">Aucun asset pour l'instant.</p>
+            <p className="px-1 py-2 text-sm text-muted-foreground">
+              Aucun asset pour l'instant.
+            </p>
           )}
-          {assets.map((a) => (
-            <button
-              key={a.id}
-              className={"asset-item" + (a.id === assetId ? " active" : "")}
-              onClick={() => onSelectAsset(a.id)}
-            >
-              <span className="asset-name">{a.name}</span>
-              <span className="dots" aria-hidden>
-                {STAGES.map((s) => (
+          {assets.map((a) => {
+            const active = a.id === assetId;
+            return (
+              <button
+                key={a.id}
+                className={cn(
+                  "relative flex items-center justify-between gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm transition-colors",
+                  active
+                    ? "bg-primary/15 text-foreground"
+                    : "text-foreground hover:bg-muted",
+                )}
+                onClick={() => onSelectAsset(a.id)}
+              >
+                {active && (
                   <span
-                    key={s.key}
-                    className={`dot ${stageStatus(bundle, a.id, s.key)}`}
-                    title={`${s.label}: ${stageStatus(bundle, a.id, s.key)}`}
+                    aria-hidden
+                    className="absolute inset-y-0 left-0 w-[3px] bg-primary"
                   />
-                ))}
-              </span>
-            </button>
-          ))}
+                )}
+                <span className="truncate">{a.name}</span>
+                <span className="flex shrink-0 items-center gap-1" aria-hidden>
+                  {STAGES.map((s) => {
+                    const status = stageStatus(bundle, a.id, s.key);
+                    return (
+                      <span
+                        key={s.key}
+                        className={cn(
+                          "size-2 rounded-full",
+                          DOT_COLOR[status],
+                        )}
+                        title={`${s.label}: ${status}`}
+                      />
+                    );
+                  })}
+                </span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      <NewAssetForm
-        project={project}
-        onCreated={onCreatedAsset}
-      />
+      <NewAssetForm project={project} onCreated={onCreatedAsset} />
     </aside>
   );
 }

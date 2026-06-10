@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { Skeleton } from "@/components/ui/skeleton";
 import { VIEW_FILES } from "../lib/constants";
 import { assetFileUrl } from "../lib/api";
 
@@ -44,15 +45,24 @@ export function MultiviewGallery({
   }, [project, assetId, version]);
 
   return (
-    <div className="views">
+    <div className="grid grid-cols-4 gap-3">
       {VIEW_FILES.map((v) => (
-        <figure key={v}>
-          {urls[v] ? (
-            <img src={urls[v]} alt={v} loading="lazy" />
-          ) : (
-            <div className="view-skeleton" />
-          )}
-          <figcaption>{v}</figcaption>
+        <figure key={v} className="flex flex-col gap-1.5">
+          <div className="aspect-square overflow-hidden rounded-md border border-border bg-muted">
+            {urls[v] ? (
+              <img
+                src={urls[v]}
+                alt={v}
+                loading="lazy"
+                className="h-full w-full object-cover transition-transform duration-200 hover:scale-105"
+              />
+            ) : (
+              <Skeleton className="h-full w-full rounded-none" />
+            )}
+          </div>
+          <figcaption className="text-center text-xs text-muted-foreground">
+            {v}
+          </figcaption>
         </figure>
       ))}
     </div>

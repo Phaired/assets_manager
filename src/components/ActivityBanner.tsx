@@ -7,6 +7,11 @@ import type {
 } from "../lib/types";
 import { STAGES } from "../lib/constants";
 import { lastLine } from "../lib/format";
+import { cn } from "@/lib/utils";
+
+const bannerBase =
+  "flex items-center gap-2 px-5 py-2 text-sm border-b border-border " +
+  "animate-in slide-in-from-top-1 fade-in duration-200";
 
 /**
  * Global activity banner. Priority: server starting (model load) > job running
@@ -23,13 +28,19 @@ export function ActivityBanner({
 
   if (server && server.status === "starting") {
     return (
-      <div className="banner banner-starting" role="status" aria-live="polite">
-        <Loader2 size={15} className="spin" />
+      <div
+        className={cn(bannerBase, "bg-run/15 text-run")}
+        role="status"
+        aria-live="polite"
+      >
+        <Loader2 size={15} className="animate-spin shrink-0" />
         <span>
           Démarrage du serveur Hunyuan <b>{server.backend ?? ""}</b> — chargement
           du modèle sur le GPU (1 à 3 min)…
         </span>
-        <span className="banner-log">{lastLine(server.logTail)}</span>
+        <span className="ml-auto truncate font-mono text-xs text-muted-foreground">
+          {lastLine(server.logTail)}
+        </span>
       </div>
     );
   }
@@ -45,8 +56,12 @@ export function ActivityBanner({
       STAGES.find((x) => job.stages?.includes(x.key))?.label ??
       (job.stages ?? []).join(", ");
     return (
-      <div className="banner banner-running" role="status" aria-live="polite">
-        <Loader2 size={15} className="spin" />
+      <div
+        className={cn(bannerBase, "bg-primary/15 text-primary")}
+        role="status"
+        aria-live="polite"
+      >
+        <Loader2 size={15} className="animate-spin shrink-0" />
         <span>
           Génération en cours — <b>{job.assetId}</b> · {stageLabel}
         </span>
@@ -56,10 +71,15 @@ export function ActivityBanner({
 
   if (server && server.status === "error") {
     return (
-      <div className="banner banner-error" role="alert">
-        <AlertTriangle size={15} />
+      <div
+        className={cn(bannerBase, "bg-destructive/15 text-destructive")}
+        role="alert"
+      >
+        <AlertTriangle size={15} className="shrink-0" />
         <span>Serveur Hunyuan : {server.error ?? "erreur"}</span>
-        <span className="banner-log">{lastLine(server.logTail)}</span>
+        <span className="ml-auto truncate font-mono text-xs text-muted-foreground">
+          {lastLine(server.logTail)}
+        </span>
       </div>
     );
   }

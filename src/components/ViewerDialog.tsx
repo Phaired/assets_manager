@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { X, Upload } from "lucide-react";
+import { Upload } from "lucide-react";
 
 import { LazyViewer3D } from "./LazyViewer3D";
-import { Modal } from "./Modal";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 export function ViewerDialog({
   initialSrc,
@@ -34,49 +41,57 @@ export function ViewerDialog({
   }
 
   return (
-    <Modal onClose={onClose} className="modal-box wide" labelledBy="viewer-title">
-      <div className="modal-head">
-        <h2 id="viewer-title">Visualiseur 3D</h2>
-        <button className="btn icon ghost" onClick={onClose} aria-label="Fermer">
-          <X size={16} />
-        </button>
-      </div>
+    <Dialog
+      open
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+    >
+      <DialogContent className="max-w-[900px]">
+        <DialogHeader>
+          <DialogTitle>Visualiseur 3D</DialogTitle>
+        </DialogHeader>
 
-      <div
-        className={"drop" + (over ? " over" : "")}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setOver(true);
-        }}
-        onDragLeave={() => setOver(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setOver(false);
-          loadFile(e.dataTransfer.files?.[0]);
-        }}
-      >
-        <Upload size={16} />
-        <span>
-          Glisse un fichier <b>.glb / .gltf</b> ici, ou{" "}
-          <button
-            type="button"
-            className="linklike"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            choisis un fichier
-          </button>
-          .
-        </span>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".glb,.gltf"
-          hidden
-          onChange={(e) => loadFile(e.target.files?.[0])}
-        />
-      </div>
+        <div
+          className={cn(
+            "flex items-center gap-2 rounded-md border border-dashed border-border bg-muted px-4 py-3 text-sm text-muted-foreground transition-colors",
+            over && "border-primary bg-primary/10 text-foreground"
+          )}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setOver(true);
+          }}
+          onDragLeave={() => setOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setOver(false);
+            loadFile(e.dataTransfer.files?.[0]);
+          }}
+        >
+          <Upload size={16} />
+          <span>
+            Glisse un fichier <b className="font-semibold text-foreground">.glb / .gltf</b> ici, ou{" "}
+            <Button
+              type="button"
+              variant="link"
+              className="h-auto p-0"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              choisis un fichier
+            </Button>
+            .
+          </span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".glb,.gltf"
+            hidden
+            onChange={(e) => loadFile(e.target.files?.[0])}
+          />
+        </div>
 
-      <LazyViewer3D src={src} height={480} />
-    </Modal>
+        <LazyViewer3D src={src} height={480} />
+      </DialogContent>
+    </Dialog>
   );
 }

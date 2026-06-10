@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { X, Wand2, Eraser, Loader2, AlertTriangle } from "lucide-react";
+import { Wand2, Eraser, Loader2, AlertTriangle } from "lucide-react";
 
-import { Modal } from "./Modal";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { assetFileUrl } from "../lib/api";
 import { useEditImage } from "../lib/queries";
 
@@ -153,93 +162,92 @@ export function ImageEditDialog({
   }
 
   return (
-    <Modal
-      onClose={onClose}
-      className="modal-box wide"
-      labelledBy="edit-title"
+    <Dialog
+      open
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
     >
-      <div className="modal-head">
-        <h2 id="edit-title">Modifier l'image</h2>
-        <button className="btn icon ghost" onClick={onClose} aria-label="Fermer">
-          <X size={16} />
-        </button>
-      </div>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Modifier l'image</DialogTitle>
+          <DialogDescription>
+            Décris la modification. Peins (optionnel) la zone à modifier — le
+            reste de l'image est préservé.
+          </DialogDescription>
+        </DialogHeader>
 
-      <p className="muted small">
-        Décris la modification. Peins (optionnel) la zone à modifier — le reste de
-        l'image est préservé.
-      </p>
-
-      <div className="edit-canvas-wrap">
-        {imgError ? (
-          <div className="viewer-overlay-msg error">
-            <AlertTriangle size={24} />
-            <span>Aucune image source à éditer.</span>
-          </div>
-        ) : (
-          <div className="edit-stage">
-            {imgUrl && (
-              <img
-                ref={imgRef}
-                src={imgUrl}
-                alt="source"
-                onLoad={onImgLoad}
-                onError={onImgError}
-                draggable={false}
-              />
-            )}
-            <canvas
-              ref={canvasRef}
-              className="edit-mask"
-              onPointerDown={(e) => {
-                drawing.current = true;
-                (e.target as HTMLElement).setPointerCapture(e.pointerId);
-                paint(e);
-              }}
-              onPointerMove={(e) => drawing.current && paint(e)}
-              onPointerUp={() => (drawing.current = false)}
-              onPointerLeave={() => (drawing.current = false)}
-            />
-          </div>
-        )}
-      </div>
-
-      <textarea
-        className="input"
-        rows={2}
-        placeholder="ex. rends la cape rouge, garde le reste identique"
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-      />
-
-      {edit.isError && (
-        <p className="muted small error-text">
-          {(edit.error as Error)?.message ?? "échec de l'édition"}
-        </p>
-      )}
-
-      <div className="row edit-actions">
-        <button
-          className="btn ghost sm"
-          onClick={clearMask}
-          disabled={!hasMask || edit.isPending}
-        >
-          <Eraser size={14} /> Effacer le masque
-        </button>
-        <span className="action-spacer" />
-        <button
-          className="btn primary sm"
-          onClick={onApply}
-          disabled={!prompt.trim() || imgError || edit.isPending}
-        >
-          {edit.isPending ? (
-            <Loader2 size={14} className="spin" />
+        <div className="flex min-h-[120px] justify-center">
+          {imgError ? (
+            <div className="flex flex-col items-center gap-2.5 whitespace-nowrap text-sm text-destructive">
+              <AlertTriangle size={24} />
+              <span>Aucune image source à éditer.</span>
+            </div>
           ) : (
-            <Wand2 size={14} />
+            <div className="relative inline-block max-h-[52vh] max-w-full leading-[0]">
+              {imgUrl && (
+                <img
+                  ref={imgRef}
+                  src={imgUrl}
+                  alt="source"
+                  onLoad={onImgLoad}
+                  onError={onImgError}
+                  draggable={false}
+                  className="block max-h-[52vh] max-w-full select-none rounded-md"
+                />
+              )}
+              <canvas
+                ref={canvasRef}
+                className="absolute inset-0 h-full w-full cursor-crosshair touch-none"
+                onPointerDown={(e) => {
+                  drawing.current = true;
+                  (e.target as HTMLElement).setPointerCapture(e.pointerId);
+                  paint(e);
+                }}
+                onPointerMove={(e) => drawing.current && paint(e)}
+                onPointerUp={() => (drawing.current = false)}
+                onPointerLeave={() => (drawing.current = false)}
+              />
+            </div>
           )}
-          Appliquer
-        </button>
-      </div>
-    </Modal>
+        </div>
+
+        <Textarea
+          rows={2}
+          placeholder="ex. rends la cape rouge, garde le reste identique"
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+        />
+
+        {edit.isError && (
+          <p className="text-sm text-destructive">
+            {(edit.error as Error)?.message ?? "échec de l'édition"}
+          </p>
+        )}
+
+        <DialogFooter className="sm:justify-between">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearMask}
+            disabled={!hasMask || edit.isPending}
+          >
+            <Eraser size={14} /> Effacer le masque
+          </Button>
+          <Button
+            size="sm"
+            onClick={onApply}
+            disabled={!prompt.trim() || imgError || edit.isPending}
+          >
+            {edit.isPending ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : (
+              <Wand2 size={14} />
+            )}
+            Appliquer
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -4,11 +4,12 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::types::{JobSnapshot, ServerStatus};
+use crate::types::{InstallProgress, JobSnapshot, ServerStatus};
 
 pub const EVENT_SERVER_STATUS: &str = "server-status";
 pub const EVENT_PROJECT_CHANGED: &str = "project-changed";
 pub const EVENT_JOB_CHANGED: &str = "job-changed";
+pub const EVENT_INSTALL_PROGRESS: &str = "install-progress";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,4 +35,9 @@ pub fn emit_project_changed(app: &AppHandle, name: &str) {
 /// Emit `job-changed` with a fresh snapshot.
 pub fn emit_job_changed(app: &AppHandle, snapshot: &JobSnapshot) {
     let _ = app.emit(EVENT_JOB_CHANGED, snapshot);
+}
+
+/// Emit `install-progress`.
+pub fn emit_install_progress(app: &AppHandle, progress: &InstallProgress) {
+    let _ = app.emit(EVENT_INSTALL_PROGRESS, progress);
 }

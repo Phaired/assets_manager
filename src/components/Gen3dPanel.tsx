@@ -1,17 +1,61 @@
 import { useEffect, useMemo, useState } from "react";
-import { Sliders, Loader2, Check, RotateCcw } from "lucide-react";
+import { Sliders, Loader2, Check, RotateCcw, Info } from "lucide-react";
 
-import type { Asset, Gen3d } from "../lib/types";
-import { useConfig, useSetAssetGen3d } from "../lib/queries";
+import type { Asset, Backend, Gen3d } from "@/lib/types";
+import { useConfig, useSetAssetGen3d } from "@/lib/queries";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 // Fields exposed in the panel (a subset of Gen3d that matters per asset).
-const NUM_FIELDS: Array<{ key: keyof Gen3d; label: string; step?: number }> = [
-  { key: "targetFaceNum", label: "Polygones (cible finale)" },
-  { key: "faceCountV21", label: "Faces brutes (v21)" },
-  { key: "octreeResolution", label: "Résolution octree" },
-  { key: "stepsV21", label: "Étapes (v21)" },
-  { key: "stepsMv2", label: "Étapes (mv2)" },
-  { key: "guidanceScale", label: "Guidance", step: 0.5 },
+// `backends` restricts a field to specific backends; omit = applies to all.
+const NUM_FIELDS: Array<{
+  key: keyof Gen3d;
+  label: string;
+  step?: number;
+  backends?: Backend[];
+  hint: string;
+}> = [
+  {
+    key: "targetFaceNum",
+    label: "Polygones (cible finale)",
+    hint: "Nombre de faces conservées après simplification finale du maillage.",
+  },
+  {
+    key: "faceCountV21",
+    label: "Faces brutes (v21)",
+    backends: ["v21"],
+    hint: "Densité du maillage brut avant simplification (backend v21 uniquement).",
+  },
+  {
+    key: "octreeResolution",
+    label: "Résolution octree",
+    hint: "Résolution de la grille de reconstruction. Plus haut = plus de détail, plus lent.",
+  },
+  {
+    key: "stepsV21",
+    label: "Étapes (v21)",
+    backends: ["v21"],
+    hint: "Étapes de diffusion (v21). Plus = plus net mais plus lent.",
+  },
+  {
+    key: "stepsMv2",
+    label: "Étapes (mv2)",
+    backends: ["mv2"],
+    hint: "Étapes de diffusion (mv2). Plus = plus net mais plus lent.",
+  },
+  {
+    key: "guidanceScale",
+    label: "Guidance",
+    step: 0.5,
+    hint: "Fidélité au conditionnement image. Trop haut peut rigidifier le résultat.",
+  },
 ];
 
 // Quick presets tune the polygon-related fields.
@@ -61,6 +105,14 @@ export function Gen3dPanel({
 
   if (!values || !defaults) return null;
 
+  // Only show fields relevant to the asset's backend ("auto" shows everything).
+  const fields = NUM_FIELDS.filter(
+    (f) =>
+      !f.backends ||
+      asset.backend === "auto" ||
+      f.backends.includes(asset.backend),
+  );
+
   function setField(key: keyof Gen3d, raw: number | boolean) {
     setValues((v) => (v ? { ...v, [key]: raw } : v));
     setSaved(false);
@@ -94,78 +146,96 @@ export function Gen3dPanel({
   }
 
   return (
-    <div className="gen3d-panel">
-      <button
-        className="gen3d-toggle"
+    <div className="flex flex-col gap-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        className="w-fit justify-start gap-2 px-2 text-muted-foreground hover:text-foreground"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
       >
-        <Sliders size={14} />
+        <Sliders className="size-3.5" />
         Paramètres 3D
-        {hasOverride && <span className="pill pill-on">personnalisé</span>}
-      </button>
+        {hasOverride && (
+          <Badge variant="secondary" className="ml-1 text-run">
+            personnalisé
+          </Badge>
+        )}
+      </Button>
 
       {open && (
-        <div className="gen3d-body">
-          <div className="gen3d-presets">
-            <span className="muted small">Presets :</span>
+        <div className="flex flex-col gap-4 rounded-lg border border-border bg-card p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-muted-foreground">Presets :</span>
             {Object.keys(PRESETS).map((name) => (
-              <button
+              <Button
                 key={name}
-                className="btn ghost xs"
+                variant="ghost"
+                size="xs"
                 onClick={() => applyPreset(name)}
               >
                 {name}
-              </button>
+              </Button>
             ))}
           </div>
 
-          <div className="gen3d-grid">
-            {NUM_FIELDS.map((f) => (
-              <label key={f.key} className="gen3d-field">
-                <span>{f.label}</span>
-                <input
-                  className="input"
+          {asset.backend === "auto" && (
+            <p className="text-xs text-muted-foreground">
+              Backend « auto » : les paramètres des deux moteurs sont affichés.
+            </p>
+          )}
+
+          <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+            {fields.map((f) => (
+              <div key={f.key} className="flex flex-col gap-1.5">
+                <Label className="flex items-center gap-1 text-xs text-muted-foreground">
+                  {f.label}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Info className="size-3 cursor-help opacity-60" />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-[240px]">
+                      {f.hint}
+                    </TooltipContent>
+                  </Tooltip>
+                </Label>
+                <Input
                   type="number"
                   step={f.step ?? 1}
                   value={Number(values[f.key])}
-                  onChange={(e) =>
-                    setField(f.key, Number(e.target.value))
-                  }
+                  onChange={(e) => setField(f.key, Number(e.target.value))}
                 />
-              </label>
+              </div>
             ))}
-            <label className="gen3d-field gen3d-toggle-field">
-              <span>Texture</span>
+            <Label className="col-span-2 flex w-fit items-center gap-2 text-xs text-muted-foreground">
               <input
                 type="checkbox"
+                className="size-4 accent-primary"
                 checked={values.texture}
                 onChange={(e) => setField("texture", e.target.checked)}
               />
-            </label>
+              Texture
+            </Label>
           </div>
 
-          <div className="row gen3d-actions">
-            <button
-              className="btn primary sm"
-              onClick={onSave}
-              disabled={save.isPending}
-            >
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={onSave} disabled={save.isPending}>
               {save.isPending ? (
-                <Loader2 size={14} className="spin" />
+                <Loader2 className="size-3.5 animate-spin" />
               ) : saved ? (
-                <Check size={14} />
+                <Check className="size-3.5" />
               ) : null}
               Enregistrer
-            </button>
-            <button
-              className="btn ghost sm"
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={onReset}
               disabled={save.isPending || !hasOverride}
               title="Revenir aux paramètres globaux"
             >
-              <RotateCcw size={14} /> Défauts
-            </button>
+              <RotateCcw className="size-3.5" /> Défauts
+            </Button>
           </div>
         </div>
       )}

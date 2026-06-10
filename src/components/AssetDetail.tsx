@@ -10,14 +10,19 @@ import {
   Paintbrush,
 } from "lucide-react";
 
-import type { ProjectBundle, StageKey, StageState } from "../lib/types";
+import { toast } from "sonner";
+
+import type { Backend, ProjectBundle, StageKey, StageState } from "../lib/types";
 import { ALL_STAGES, STAGES } from "../lib/constants";
 import {
   useDeleteAsset,
   useGenerate,
   useResetAsset,
+  useServer,
+  useUpdateAsset,
   useUploadSource,
 } from "../lib/queries";
+import { planAssetImages } from "../lib/assetStatus";
 import { save } from "@tauri-apps/plugin-dialog";
 import { assetFileUrl, saveAssetFile } from "../lib/api";
 import { StageCard } from "./StageCard";
@@ -25,6 +30,21 @@ import { MultiviewGallery } from "./MultiviewGallery";
 import { LazyViewer3D } from "./LazyViewer3D";
 import { Gen3dPanel } from "./Gen3dPanel";
 import { ImageEditDialog } from "./ImageEditDialog";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 
 export function AssetDetail({
   project,
@@ -43,6 +63,8 @@ export function AssetDetail({
   const reset = useResetAsset(project);
   const del = useDeleteAsset(project);
   const upload = useUploadSource(project);
+  const updateAsset = useUpdateAsset(project);
+  const serverQ = useServer();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [modelUrl, setModelUrl] = useState<string | null>(null);
@@ -66,8 +88,9 @@ export function AssetDetail({
   const mvVer = multiviewState?.updatedAt ?? "0";
 
   const modelReady = model3dState?.status === "done";
-  const mvDone =
-    multiviewState?.status === "done" && asset?.source !== "manual";
+  // Show the generated views whenever they exist on disk — including after a
+  // manual source was later uploaded (the views are still useful context).
+  const mvDone = multiviewState?.status === "done";
 
   // Resolve the local model.glb to a webview URL, cache-busted by updatedAt.
   useEffect(() => {
@@ -104,28 +127,55 @@ export function AssetDetail({
 
   if (!asset || !project || !assetId) {
     return (
-      <div className="empty-detail">
-        <div className="empty-art" aria-hidden>
-          <span className="empty-cube" />
+      <div className="flex flex-1 flex-col items-center justify-center gap-4 p-10 text-center">
+        <div
+          className="flex size-20 items-center justify-center rounded-lg border border-border bg-card"
+          aria-hidden
+        >
+          <span className="size-8 rounded-md bg-muted" />
         </div>
-        <p className="muted">Sélectionne ou crée un asset.</p>
+        <p className="text-muted-foreground">Sélectionne ou crée un asset.</p>
       </div>
     );
   }
 
+  const plan = planAssetImages(
+    asset,
+    multiviewState?.status,
+    serverQ.data ?? null,
+  );
+
   function runStages(s: StageKey[]) {
-    generate.mutate({ assetId: assetId as string, stages: s });
+    // Guard a standalone 3D run when its image prerequisites aren't met (mv2
+    // needs 4 views, v21 needs a source). Running multiview in the same batch is
+    // fine — the views will exist by the time model3d runs.
+    if (
+      s.includes("model3d") &&
+      !s.includes("multiview") &&
+      plan.model3dBlocked
+    ) {
+      toast.error(plan.model3dBlocked);
+      return;
+    }
+    generate.mutate(
+      { assetId: assetId as string, stages: s },
+      { onSuccess: () => toast.success("Génération lancée") },
+    );
   }
 
   async function onUploadFile(file: File | undefined | null) {
     if (!file) return;
     const buf = new Uint8Array(await file.arrayBuffer());
-    upload.mutate({ assetId: assetId as string, bytes: Array.from(buf) });
+    upload.mutate(
+      { assetId: assetId as string, bytes: Array.from(buf) },
+      { onSuccess: () => toast.success("Image source importée") },
+    );
   }
 
   async function onDelete() {
     if (!window.confirm("Supprimer cet asset et ses fichiers ?")) return;
     await del.mutateAsync(assetId as string);
+    toast.success("Asset supprimé");
     onDeleted();
   }
 
@@ -135,40 +185,92 @@ export function AssetDetail({
       : undefined;
 
   return (
-    <div className="asset-detail">
-      <div className="detail-header">
-        <h2>
-          {asset.name} <span className="muted">· {asset.id}</span>
+    <div className="flex flex-col gap-6 p-6">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-lg font-semibold text-foreground">
+          {asset.name}{" "}
+          <span className="font-normal text-muted-foreground">
+            · {asset.id}
+          </span>
         </h2>
         {asset.description && (
-          <p className="muted detail-desc">{asset.description}</p>
+          <p className="text-sm text-muted-foreground">{asset.description}</p>
         )}
       </div>
 
-      <div className="action-row">
-        <span className="meta-chip">
-          <span className="meta-chip-label">Backend</span>
-          <span className="pill pill-stopped">{asset.backend}</span>
-        </span>
-        <span className="meta-chip">
-          <span className="meta-chip-label">Source</span>
-          <span className="pill pill-stopped">{asset.source}</span>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="inline-flex items-center gap-2">
+          <span className="text-muted-foreground">Backend</span>
+          <Select
+            value={asset.backend}
+            onValueChange={(v) =>
+              updateAsset.mutate(
+                { assetId: assetId as string, backend: v as Backend },
+                { onSuccess: () => toast.success("Backend mis à jour") },
+              )
+            }
+            disabled={updateAsset.isPending || jobBusy}
+          >
+            <SelectTrigger className="h-7 w-[185px] text-xs" aria-label="Backend 3D">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">Backend : auto</SelectItem>
+              <SelectItem value="v21">Hunyuan 2.1 · mono</SelectItem>
+              <SelectItem value="mv2">Hunyuan 2mv · 4 vues</SelectItem>
+            </SelectContent>
+          </Select>
+          {asset.backend === "auto" && plan.effectiveBackend !== "auto" && (
+            <span className="text-muted-foreground">
+              → {plan.effectiveBackend}
+            </span>
+          )}
         </span>
 
-        <span className="action-spacer" />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge
+              variant="outline"
+              className={cn(
+                plan.mode === "multi"
+                  ? "text-primary"
+                  : plan.mode === "mono"
+                    ? "text-foreground"
+                    : "text-muted-foreground",
+              )}
+            >
+              {plan.mode === "multi"
+                ? "multi-image"
+                : plan.mode === "mono"
+                  ? "mono-image"
+                  : "auto"}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>La 3D utilisera : {plan.feedsLabel}</TooltipContent>
+        </Tooltip>
 
-        <button
-          className="btn ghost sm"
+        <span className="inline-flex items-center gap-2">
+          <span className="text-muted-foreground">Source</span>
+          <Badge variant="secondary" className="font-mono">
+            {asset.source}
+          </Badge>
+        </span>
+
+        <span className="flex-1" />
+
+        <Button
+          variant="ghost"
+          size="sm"
           onClick={() => fileInputRef.current?.click()}
           disabled={upload.isPending}
         >
           {upload.isPending ? (
-            <Loader2 size={14} className="spin" />
+            <Loader2 className="animate-spin" />
           ) : (
-            <Upload size={14} />
+            <Upload />
           )}
           Image source manuelle
-        </button>
+        </Button>
         <input
           ref={fileInputRef}
           type="file"
@@ -177,48 +279,55 @@ export function AssetDetail({
           onChange={(e) => onUploadFile(e.target.files?.[0])}
         />
 
-        <button
-          className="btn ghost sm"
+        <Button
+          variant="ghost"
+          size="sm"
           onClick={() => setEditOpen(true)}
           disabled={
             asset.source !== "manual" && multiviewState?.status !== "done"
           }
           title="Modifier l'image source via OpenAI (couleur, détails…)"
         >
-          <Paintbrush size={14} /> Modifier l'image
-        </button>
+          <Paintbrush /> Modifier l'image
+        </Button>
 
-        <button
-          className="btn primary sm"
+        <Button
+          size="sm"
           onClick={() => runStages(ALL_STAGES)}
           disabled={generate.isPending}
         >
-          <Wand2 size={14} /> Tout générer
-        </button>
-        <button
-          className="btn ghost sm"
+          <Wand2 /> Tout générer
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
           title="Débloque les étapes coincées en 'en cours'"
           onClick={() => reset.mutate(assetId)}
           disabled={reset.isPending}
         >
-          <RotateCcw size={14} /> Réinitialiser
-        </button>
-        <button
-          className="btn ghost sm danger"
+          <RotateCcw /> Réinitialiser
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-destructive hover:text-destructive"
           onClick={onDelete}
           disabled={del.isPending}
         >
-          <Trash2 size={14} /> Supprimer
-        </button>
+          <Trash2 /> Supprimer
+        </Button>
       </div>
 
-      <div className="stage-grid">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
         {STAGES.map((def) => (
           <StageCard
             key={def.key}
             def={def}
             state={stages[def.key]}
             disabled={jobBusy || generate.isPending}
+            blockedReason={
+              def.key === "model3d" ? plan.model3dBlocked : undefined
+            }
             onRun={() => runStages([def.key])}
           />
         ))}
@@ -227,8 +336,8 @@ export function AssetDetail({
       <Gen3dPanel project={project} asset={asset} />
 
       {mvDone && (
-        <section className="detail-section">
-          <h3 className="section-title">Multivue</h3>
+        <section className="flex flex-col gap-3">
+          <h3 className="text-sm font-semibold text-foreground">Multivue</h3>
           <MultiviewGallery
             project={project}
             assetId={assetId}
@@ -238,31 +347,36 @@ export function AssetDetail({
       )}
 
       {modelReady && (
-        <section className="detail-section">
-          <h3 className="section-title">Modèle 3D</h3>
+        <section className="flex flex-col gap-3">
+          <h3 className="text-sm font-semibold text-foreground">Modèle 3D</h3>
           <LazyViewer3D src={modelUrl} height={420} />
-          <div className="row viewer-actions">
-            <button
-              className="btn ghost sm"
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => modelUrl && onEnlarge(modelUrl)}
               disabled={!modelUrl}
             >
-              <Maximize2 size={14} /> Agrandir dans le visualiseur
-            </button>
-            <button
-              className="btn ghost sm"
+              <Maximize2 /> Agrandir dans le visualiseur
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={downloadGlb}
               disabled={!modelReady}
             >
-              <Download size={14} /> Télécharger .glb
-            </button>
+              <Download /> Télécharger .glb
+            </Button>
           </div>
         </section>
       )}
 
       {exportOutput && (
-        <p className="muted export-line">
-          OBJ exporté : <code>{exportOutput}</code>
+        <p className="text-sm text-muted-foreground">
+          OBJ exporté :{" "}
+          <code className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground">
+            {exportOutput}
+          </code>
         </p>
       )}
 

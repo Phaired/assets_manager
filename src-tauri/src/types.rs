@@ -199,6 +199,32 @@ pub struct ServerStatus {
     pub managed: bool,
 }
 
+// --- InstallProgress ----------------------------------------------------
+
+/// Progress snapshot of the guided Hunyuan backend installer. Pushed to the UI
+/// via the `install-progress` event and returned by the `install_status` command.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallProgress {
+    /// Backend being installed (e.g. "mv2"), or None when idle.
+    pub backend: Option<String>,
+    /// True while a pipeline is running.
+    pub running: bool,
+    /// Current phase key (preflight, python, code, venv, torch, deps,
+    /// extensions, weights, config, start, done).
+    pub phase: String,
+    /// Overall progress 0..100.
+    pub pct: u8,
+    /// Human-readable status line for the current phase.
+    pub message: String,
+    /// Tail of the install log (last lines).
+    pub log_tail: String,
+    /// True once the install finished successfully.
+    pub done: bool,
+    /// User-facing error message when the install failed or was cancelled.
+    pub error: Option<String>,
+}
+
 // --- Gen3d --------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

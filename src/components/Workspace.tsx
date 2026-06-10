@@ -6,10 +6,12 @@ import {
   useProjects,
   useServer,
 } from "../lib/queries";
+import { getLastProject, setLastProject } from "../lib/prefs";
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
 import { AssetDetail } from "./AssetDetail";
 import { ActivityBanner } from "./ActivityBanner";
+import { OnboardingBanner } from "./OnboardingBanner";
 import { SettingsDialog } from "./SettingsDialog";
 import { ViewerDialog } from "./ViewerDialog";
 
@@ -23,14 +25,33 @@ export function Workspace() {
   const [viewerOpen, setViewerOpen] = useState(false);
   const [viewerSrc, setViewerSrc] = useState<string | null>(null);
 
-  // Pick a sensible default project once the list arrives.
+  // Pick a sensible default project once the list arrives: keep the current
+  // one if still valid, else restore the last-used project from prefs, else the
+  // first available.
   useEffect(() => {
     if (!projects.length) {
       setProject(null);
       return;
     }
-    setProject((cur) => (cur && projects.includes(cur) ? cur : projects[0]));
+    let cancelled = false;
+    (async () => {
+      const last = await getLastProject();
+      if (cancelled) return;
+      setProject((cur) => {
+        if (cur && projects.includes(cur)) return cur;
+        if (last && projects.includes(last)) return last;
+        return projects[0];
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [projects]);
+
+  // Persist the selected project so the app reopens on it.
+  useEffect(() => {
+    if (project) void setLastProject(project);
+  }, [project]);
 
   const bundleQ = useProject(project);
   const serverQ = useServer();
@@ -50,7 +71,7 @@ export function Workspace() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="flex h-screen flex-col bg-background text-foreground">
       <Header
         server={serverQ.data ?? null}
         spendUsd={bundleQ.data?.state.estimatedSpendUsd ?? null}
@@ -64,7 +85,9 @@ export function Workspace() {
         bundle={bundleQ.data ?? null}
       />
 
-      <main className="main">
+      <OnboardingBanner />
+
+      <main className="flex min-h-0 flex-1">
         <Sidebar
           projects={projects}
           project={project}
@@ -79,7 +102,7 @@ export function Workspace() {
           onCreatedAsset={setAssetId}
         />
 
-        <section className="detail-pane">
+        <section className="min-w-0 flex-1 overflow-y-auto">
           <AssetDetail
             project={project}
             assetId={assetId}

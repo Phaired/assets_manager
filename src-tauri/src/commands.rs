@@ -10,13 +10,14 @@ use tauri::State;
 use crate::config::Config;
 use crate::error::AppError;
 use crate::events;
+use crate::installer::Installer;
 use crate::jobs::JobManager;
 use crate::store::Store;
 use crate::supervisor::Supervisor;
 use crate::worker::WorkerClient;
 use crate::types::{
-    Asset, ConfigPatch, ConfigPublic, Gen3dPatch, JobCurrent, Project, ProjectBundle, ProjectState,
-    ServerStatus,
+    Asset, ConfigPatch, ConfigPublic, Gen3dPatch, InstallProgress, JobCurrent, Project,
+    ProjectBundle, ProjectState, ServerStatus,
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -82,6 +83,24 @@ pub fn create_asset(
     let asset_v = store.add_asset(&project, &name, &description, tags, &backend)?;
     events::emit_project_changed(&app, &project);
     Ok(Asset::from_disk(&asset_v))
+}
+
+/// Update mutable asset fields after creation. Currently the 3D backend, so the
+/// user can switch mono (v21) / multi (mv2) / auto without recreating the asset.
+#[tauri::command]
+pub fn update_asset(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    backend: String,
+) -> CmdResult<()> {
+    if backend != "auto" && backend != "v21" && backend != "mv2" {
+        return Err(format!("backend invalide: {backend}"));
+    }
+    store.set_asset_backend(&project, &asset_id, &backend)?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
 }
 
 #[tauri::command]
@@ -346,6 +365,37 @@ pub fn server_stop(
     let status = supervisor.status();
     events::emit_server_status(&app, &status);
     Ok(status)
+}
+
+// --- hunyuan guided installer -------------------------------------------
+
+/// Start the guided install of a heavy Hunyuan backend (currently `mv2`). Runs on
+/// a background thread; progress streams via the `install-progress` event.
+#[tauri::command]
+pub fn install_backend(
+    app: tauri::AppHandle,
+    installer: State<'_, Arc<Installer>>,
+    supervisor: State<'_, Arc<Supervisor>>,
+    backend: String,
+) -> CmdResult<InstallProgress> {
+    if backend != "v21" && backend != "mv2" {
+        return Err(format!("backend invalide: {backend}"));
+    }
+    let progress = installer
+        .inner()
+        .start(app, Arc::clone(supervisor.inner()), &backend)?;
+    Ok(progress)
+}
+
+#[tauri::command]
+pub fn install_status(installer: State<'_, Arc<Installer>>) -> CmdResult<InstallProgress> {
+    Ok(installer.status())
+}
+
+#[tauri::command]
+pub fn cancel_install(installer: State<'_, Arc<Installer>>) -> CmdResult<InstallProgress> {
+    installer.cancel();
+    Ok(installer.status())
 }
 
 // --- asset file source --------------------------------------------------

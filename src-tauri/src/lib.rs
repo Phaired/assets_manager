@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod error;
 mod events;
+mod installer;
 mod jobs;
 mod store;
 mod supervisor;
@@ -18,6 +19,7 @@ use std::time::Duration;
 use tauri::Manager;
 
 use crate::config::Config;
+use crate::installer::Installer;
 use crate::jobs::JobManager;
 use crate::store::Store;
 use crate::supervisor::Supervisor;
@@ -29,6 +31,7 @@ pub fn run() {
     let config = Arc::new(Config::new());
     let store = Arc::new(Store::new(Arc::clone(&config)));
     let supervisor = Arc::new(Supervisor::new(Arc::clone(&config)));
+    let installer = Arc::new(Installer::new(Arc::clone(&config)));
     let worker = Arc::new(
         WorkerClient::new(Arc::clone(&config)).expect("failed to build worker HTTP client"),
     );
@@ -51,9 +54,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_store::Builder::new().build())
         .manage(Arc::clone(&config))
         .manage(Arc::clone(&store))
         .manage(Arc::clone(&supervisor))
+        .manage(Arc::clone(&installer))
         .manage(Arc::clone(&worker))
         .manage(Arc::clone(&jobs))
         .setup(move |app| {
@@ -78,6 +83,11 @@ pub fn run() {
                 eprintln!("create data dir {}: {e}", data.display());
             }
             config::init_paths(data, resource);
+
+            // Install the AppHandle so config persistence can reach the plugin
+            // store, then one-shot migrate any legacy config.json into it.
+            config::set_app(handle.clone());
+            config::migrate_legacy_if_needed();
 
             // Stale running/queued stages cannot survive a restart (now that the
             // workspace path is resolved).
@@ -114,6 +124,7 @@ pub fn run() {
             commands::get_project,
             commands::set_project_style,
             commands::create_asset,
+            commands::update_asset,
             commands::delete_asset,
             commands::set_asset_gen3d,
             commands::upload_source,
@@ -125,6 +136,9 @@ pub fn run() {
             commands::server_status,
             commands::server_start,
             commands::server_stop,
+            commands::install_backend,
+            commands::install_status,
+            commands::cancel_install,
             commands::asset_file_src,
             commands::save_asset_file,
         ])

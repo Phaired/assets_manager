@@ -1,9 +1,21 @@
 import { useState } from "react";
 import { Loader2, Sparkles } from "lucide-react";
+import { toast } from "sonner";
 
 import type { Backend } from "../lib/types";
 import { PRESETS } from "../lib/constants";
 import { useCreateAsset } from "../lib/queries";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export function NewAssetForm({
   project,
@@ -42,6 +54,7 @@ export function NewAssetForm({
       });
       setName("");
       setDescription("");
+      toast.success(`Asset « ${a.name} » créé`);
       onCreated(a.id);
     } catch (err) {
       setError(String(err));
@@ -49,66 +62,71 @@ export function NewAssetForm({
   }
 
   return (
-    <form className="card new-asset" onSubmit={submit}>
-      <h3>Nouvel asset</h3>
+    <Card className="gap-4 py-4">
+      <CardHeader className="px-4">
+        <CardTitle className="text-sm">Nouvel asset</CardTitle>
+      </CardHeader>
+      <CardContent className="px-4">
+        <form className="flex flex-col gap-3" onSubmit={submit}>
+          <Input
+            placeholder="Nom (ex. crusher)"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+          />
 
-      <input
-        className="input"
-        placeholder="Nom (ex. crusher)"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        required
-      />
+          <Select
+            value=""
+            onValueChange={applyPreset}
+          >
+            <SelectTrigger className="w-full" aria-label="Exemples de prompt">
+              <SelectValue placeholder="💡 Exemples de prompt…" />
+            </SelectTrigger>
+            <SelectContent>
+              {PRESETS.map((p) => (
+                <SelectItem key={p.name} value={p.text}>
+                  {p.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-      <select
-        className="input preset-select"
-        value=""
-        onChange={(e) => {
-          applyPreset(e.target.value);
-          e.currentTarget.selectedIndex = 0;
-        }}
-        aria-label="Exemples de prompt"
-      >
-        <option value="">💡 Exemples de prompt…</option>
-        {PRESETS.map((p) => (
-          <option key={p.name} value={p.text}>
-            {p.name}
-          </option>
-        ))}
-      </select>
+          <Textarea
+            placeholder="Description (style, couleurs, forme…)"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
 
-      <textarea
-        className="input"
-        placeholder="Description (style, couleurs, forme…)"
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-      />
+          <Select
+            value={backend}
+            onValueChange={(v) => setBackend(v as Backend)}
+          >
+            <SelectTrigger className="w-full" aria-label="Backend">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">Backend: auto</SelectItem>
+              <SelectItem value="v21">Hunyuan 2.1 (image unique)</SelectItem>
+              <SelectItem value="mv2">Hunyuan 2mv (4 vues)</SelectItem>
+            </SelectContent>
+          </Select>
 
-      <select
-        className="input"
-        value={backend}
-        onChange={(e) => setBackend(e.target.value as Backend)}
-        aria-label="Backend"
-      >
-        <option value="auto">Backend: auto</option>
-        <option value="v21">Hunyuan 2.1 (image unique)</option>
-        <option value="mv2">Hunyuan 2mv (4 vues)</option>
-      </select>
+          {error && (
+            <p className="rounded-md bg-destructive/15 px-3 py-2 text-sm text-destructive">
+              {error}
+            </p>
+          )}
 
-      {error && <p className="form-error">{error}</p>}
-
-      <button
-        type="submit"
-        className="btn primary"
-        disabled={createAsset.isPending || !project}
-      >
-        {createAsset.isPending ? (
-          <Loader2 size={15} className="spin" />
-        ) : (
-          <Sparkles size={15} />
-        )}
-        Créer l'asset
-      </button>
-    </form>
+          <Button type="submit" disabled={createAsset.isPending || !project}>
+            {createAsset.isPending ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : (
+              <Sparkles size={15} />
+            )}
+            Créer l'asset
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
   );
 }

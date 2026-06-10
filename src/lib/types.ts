@@ -66,6 +66,32 @@ export interface ServerStatus {
   managed: boolean; // true if our spawned subprocess is alive
 }
 
+/** Phase keys emitted by the guided Hunyuan installer (Rust `installer.rs`). */
+export type InstallPhase =
+  | "idle"
+  | "preflight"
+  | "python"
+  | "code"
+  | "venv"
+  | "torch"
+  | "deps"
+  | "extensions"
+  | "weights"
+  | "config"
+  | "start"
+  | "done";
+
+export interface InstallProgress {
+  backend: "v21" | "mv2" | null;
+  running: boolean;
+  phase: InstallPhase;
+  pct: number; // 0..100
+  message: string;
+  logTail: string;
+  done: boolean;
+  error: string | null;
+}
+
 export interface Gen3d {
   targetFaceNum: number;
   octreeResolution: number;

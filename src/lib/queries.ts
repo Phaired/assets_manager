@@ -14,6 +14,7 @@ import type {
   ConfigPatch,
   ConfigPublic,
   Gen3d,
+  InstallProgress,
   ProjectBundle,
   ServerStatus,
   StageKey,
@@ -24,6 +25,7 @@ export const qk = {
   project: (name: string) => ["project", name] as const,
   config: ["config"] as const,
   server: ["server"] as const,
+  install: ["install"] as const,
 };
 
 // --- queries -------------------------------------------------------------
@@ -87,6 +89,17 @@ export function useCreateAsset(project: string | null) {
       tags: string[];
       backend: Backend;
     }) => api.createAsset({ project: project as string, ...vars }),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useUpdateAsset(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { assetId: string; backend: Backend }) =>
+      api.updateAsset(project as string, vars.assetId, vars.backend),
     onSuccess: () => {
       if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
     },
@@ -189,6 +202,31 @@ export function useServerStop() {
   });
 }
 
+// --- guided Hunyuan installer -------------------------------------------
+
+export function useInstallStatus() {
+  return useQuery<InstallProgress>({
+    queryKey: qk.install,
+    queryFn: api.installStatus,
+  });
+}
+
+export function useInstallBackend() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (backend: "v21" | "mv2") => api.installBackend(backend),
+    onSuccess: (data) => qc.setQueryData(qk.install, data),
+  });
+}
+
+export function useCancelInstall() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.cancelInstall(),
+    onSuccess: (data) => qc.setQueryData(qk.install, data),
+  });
+}
+
 // --- event wiring --------------------------------------------------------
 
 /**
@@ -203,6 +241,20 @@ export function useEventBridge(qc: QueryClient) {
     api
       .onServerStatus((s) => {
         qc.setQueryData(qk.server, s);
+      })
+      .then((u) => {
+        if (active) unlistens.push(u);
+        else u();
+      });
+
+    api
+      .onInstallProgress((p) => {
+        qc.setQueryData(qk.install, p);
+        // When an install finishes, the backend paths + server state changed.
+        if (p.done || p.error) {
+          qc.invalidateQueries({ queryKey: qk.config });
+          qc.invalidateQueries({ queryKey: qk.server });
+        }
       })
       .then((u) => {
         if (active) unlistens.push(u);

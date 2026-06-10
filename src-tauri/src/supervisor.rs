@@ -126,6 +126,11 @@ fn command_for(backend: &str, cfg: &Value) -> AppResult<(Command, PathBuf)> {
             }
         }
     }
+    // Point the server at the centralised HuggingFace cache the guided installer
+    // filled, so weights are read from the same single folder (not ~/.cache).
+    if let Some(hf) = h.get("hf_home").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+        cmd.env("HF_HOME", hf);
+    }
     cmd.current_dir(&dir);
     Ok((cmd, dir))
 }

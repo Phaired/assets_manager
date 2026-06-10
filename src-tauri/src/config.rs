@@ -9,8 +9,27 @@ use std::path::{Path, PathBuf};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
+use tauri::AppHandle;
+use tauri_plugin_store::StoreExt;
 
 use crate::error::{AppError, AppResult};
+
+/// tauri-plugin-store file + key holding the whole settings object (merged over
+/// defaults). All settings — including the OpenAI API key — now live here.
+const STORE_FILE: &str = "settings.json";
+const CONFIG_KEY: &str = "config";
+
+/// AppHandle, installed in the Tauri `setup` hook (see `set_app`). Required to
+/// reach the plugin store. Before it is set (unit tests / pre-setup) the config
+/// falls back to defaults only — nothing reads persisted overrides that early.
+static APP: Lazy<once_cell::sync::OnceCell<AppHandle>> =
+    Lazy::new(once_cell::sync::OnceCell::new);
+
+/// Install the AppHandle so config persistence can reach the plugin store.
+/// Idempotent: only the first call wins.
+pub fn set_app(app: AppHandle) {
+    let _ = APP.set(app);
+}
 
 /// Runtime paths, resolved ONCE at startup (see `init_paths`, called from the
 /// Tauri `setup` hook). We split two roots that used to be the single compile-time
@@ -150,7 +169,8 @@ pub fn deep_merge(base: &Value, over: &Value) -> Value {
     }
 }
 
-fn read_disk() -> Value {
+/// Read the legacy `config.json` (pre-store-plugin) — used once for migration.
+fn read_legacy_file() -> Value {
     let path = config_path();
     if path.is_file() {
         match std::fs::read_to_string(&path) {
@@ -162,25 +182,54 @@ fn read_disk() -> Value {
     }
 }
 
-/// `load_config` = deep-merge config.json over defaults.
-pub fn load_config() -> Value {
-    deep_merge(&defaults(), &read_disk())
+/// Read the persisted settings object from the plugin store. Returns `{}` when
+/// the store is unavailable (pre-setup) or empty.
+fn read_store() -> Value {
+    if let Some(app) = APP.get() {
+        if let Ok(store) = app.store(STORE_FILE) {
+            if let Some(v) = store.get(CONFIG_KEY) {
+                return v;
+            }
+        }
+    }
+    json!({})
 }
 
-/// Atomically save the full merge (defaults <- config). Returns the merged value.
+/// `load_config` = deep-merge the stored settings over defaults.
+pub fn load_config() -> Value {
+    deep_merge(&defaults(), &read_store())
+}
+
+/// Save the full merge (defaults <- config) into the plugin store. Returns the
+/// merged value. Persistence is a no-op before the AppHandle is installed.
 pub fn save_config(config: &Value) -> AppResult<Value> {
     let merged = deep_merge(&defaults(), config);
-    let path = config_path();
-    let tmp = path.with_extension("tmp");
-    let text = serde_json::to_string_pretty(&merged)?;
-    std::fs::write(&tmp, text)?;
-    // tmp + rename (atomic on the same filesystem). On Windows `rename` fails if
-    // the destination exists, so remove it first.
-    if path.exists() {
-        let _ = std::fs::remove_file(&path);
+    if let Some(app) = APP.get() {
+        let store = app
+            .store(STORE_FILE)
+            .map_err(|e| AppError::msg(format!("store indisponible: {e}")))?;
+        store.set(CONFIG_KEY, merged.clone());
+        store
+            .save()
+            .map_err(|e| AppError::msg(format!("écriture du store: {e}")))?;
     }
-    std::fs::rename(&tmp, &path)?;
     Ok(merged)
+}
+
+/// One-shot migration: if the store has no settings yet, seed it from the legacy
+/// `config.json` (preserving the API key + all settings) merged over defaults.
+/// Safe to call on every startup — it only acts once.
+pub fn migrate_legacy_if_needed() {
+    let Some(app) = APP.get() else { return };
+    let Ok(store) = app.store(STORE_FILE) else {
+        return;
+    };
+    if store.has(CONFIG_KEY) {
+        return;
+    }
+    let seed = deep_merge(&defaults(), &read_legacy_file());
+    store.set(CONFIG_KEY, seed);
+    let _ = store.save();
 }
 
 /// OpenAI key = config key (trimmed) or `$OPENAI_API_KEY` (trimmed).

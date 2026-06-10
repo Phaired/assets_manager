@@ -34,7 +34,8 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../worker_dist/worker": "worker"
+      "../worker_dist/worker": "worker",
+      "../vendor/uv/uv.exe": "uv/uv.exe"
     },
     "icon": [
       "icons/32x32.png",

@@ -10,6 +10,7 @@ import type {
   ConfigPatch,
   ConfigPublic,
   Gen3d,
+  InstallProgress,
   JobCurrent,
   JobSnapshot,
   Project,
@@ -44,6 +45,15 @@ export function createAsset(args: {
   backend: Backend;
 }): Promise<Asset> {
   return invoke<Asset>("create_asset", args);
+}
+
+/** Update mutable asset fields after creation (currently the 3D backend). */
+export function updateAsset(
+  project: string,
+  assetId: string,
+  backend: Backend,
+): Promise<void> {
+  return invoke<void>("update_asset", { project, assetId, backend });
 }
 
 export function deleteAsset(project: string, assetId: string): Promise<void> {
@@ -119,6 +129,22 @@ export function serverStop(): Promise<ServerStatus> {
   return invoke<ServerStatus>("server_stop");
 }
 
+/** Start the guided install of a heavy Hunyuan backend (currently `mv2`). Runs in
+ *  the background; progress streams via the `install-progress` event. */
+export function installBackend(
+  backend: "v21" | "mv2",
+): Promise<InstallProgress> {
+  return invoke<InstallProgress>("install_backend", { backend });
+}
+
+export function installStatus(): Promise<InstallProgress> {
+  return invoke<InstallProgress>("install_status");
+}
+
+export function cancelInstall(): Promise<InstallProgress> {
+  return invoke<InstallProgress>("cancel_install");
+}
+
 export function assetFileSrc(
   project: string,
   assetId: string,
@@ -153,6 +179,14 @@ export function onServerStatus(
   handler: (s: ServerStatus) => void,
 ): Promise<UnlistenFn> {
   return listen<ServerStatus>("server-status", (e) => handler(e.payload));
+}
+
+export function onInstallProgress(
+  handler: (p: InstallProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<InstallProgress>("install-progress", (e) =>
+    handler(e.payload),
+  );
 }
 
 export function onProjectChanged(

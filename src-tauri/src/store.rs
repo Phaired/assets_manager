@@ -308,6 +308,31 @@ impl Store {
         self.save_project(project, &data)
     }
 
+    /// Change an asset's 3D backend ("auto" | "v21" | "mv2") after creation.
+    pub fn set_asset_backend(&self, project: &str, asset_id: &str, backend: &str) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let mut data = self.get_project(project)?;
+        let mut found = false;
+        if let Some(arr) = data.get_mut("assets").and_then(|a| a.as_array_mut()) {
+            for asset in arr.iter_mut() {
+                if asset.get("id").and_then(|x| x.as_str()) == Some(asset_id) {
+                    asset
+                        .as_object_mut()
+                        .map(|o| o.insert("backend".into(), Value::String(backend.to_string())));
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            return Err(AppError::AssetNotFound {
+                project: project.to_string(),
+                asset_id: asset_id.to_string(),
+            });
+        }
+        self.save_project(project, &data)
+    }
+
     pub fn set_asset_source(&self, project: &str, asset_id: &str, source: &str) -> AppResult<()> {
         let _guard = LOCK.lock();
         let mut data = self.get_project(project)?;

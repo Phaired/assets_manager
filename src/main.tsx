@@ -1,6 +1,11 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  MutationCache,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   createRootRoute,
   createRoute,
@@ -13,6 +18,11 @@ import { RootLayout } from "./components/RootLayout";
 import "./styles/index.css";
 
 const queryClient = new QueryClient({
+  // Every failed mutation surfaces a toast automatically; components add their
+  // own success toasts where a positive confirmation is useful.
+  mutationCache: new MutationCache({
+    onError: (err) => toast.error(String(err)),
+  }),
   defaultOptions: {
     queries: {
       staleTime: 5_000,
