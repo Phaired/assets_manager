@@ -2,9 +2,10 @@ import { useState } from "react";
 import { Loader2, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
-import type { Backend } from "../lib/types";
+import type { AssetKind, Backend } from "../lib/types";
 import { PRESETS } from "../lib/constants";
 import { useCreateAsset } from "../lib/queries";
+import { SuggestButton } from "./SuggestButton";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -16,6 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 
 export function NewAssetForm({
   project,
@@ -28,6 +30,7 @@ export function NewAssetForm({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [backend, setBackend] = useState<Backend>("auto");
+  const [kind, setKind] = useState<AssetKind>("model");
   const [error, setError] = useState<string | null>(null);
 
   function applyPreset(text: string) {
@@ -51,6 +54,7 @@ export function NewAssetForm({
         description: description.trim(),
         tags: [],
         backend,
+        kind,
       });
       setName("");
       setDescription("");
@@ -65,48 +69,92 @@ export function NewAssetForm({
     <Card className="py-4">
       <CardContent className="px-4">
         <form className="flex flex-col gap-3" onSubmit={submit}>
+          {/* Type d'asset : modèle 3D (pipeline complet) ou texture seamless. */}
+          <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-secondary/30 p-1">
+            {(
+              [
+                ["model", "Modèle 3D"],
+                ["texture", "Texture"],
+              ] as Array<[AssetKind, string]>
+            ).map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setKind(k)}
+                aria-pressed={kind === k}
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-sm transition-colors",
+                  kind === k
+                    ? "bg-primary/15 font-medium text-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
           <Input
-            placeholder="Nom (ex. crusher)"
+            placeholder={kind === "texture" ? "Nom (ex. herbe)" : "Nom (ex. crusher)"}
             value={name}
             onChange={(e) => setName(e.target.value)}
             required
           />
 
-          <Textarea
-            placeholder="Description (style, couleurs, forme…)"
-            rows={3}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-1 text-xs text-muted-foreground">Exemples :</span>
-            {PRESETS.map((p) => (
-              <button
-                key={p.name}
-                type="button"
-                onClick={() => applyPreset(p.text)}
-                title={p.text}
-                className="rounded-full border border-border bg-secondary/50 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
-              >
-                {p.name}
-              </button>
-            ))}
+          <div className="flex flex-col gap-1">
+            <Textarea
+              placeholder={
+                kind === "texture"
+                  ? "Description (matière, motif, couleurs…)"
+                  : "Description (style, couleurs, forme…)"
+              }
+              rows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+            {project && (
+              <div className="self-end">
+                <SuggestButton
+                  project={project}
+                  target={kind === "texture" ? "texture" : "multiview"}
+                  onPick={setDescription}
+                />
+              </div>
+            )}
           </div>
 
-          <Select
-            value={backend}
-            onValueChange={(v) => setBackend(v as Backend)}
-          >
-            <SelectTrigger className="w-full" aria-label="Backend">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">Backend: auto</SelectItem>
-              <SelectItem value="v21">Hunyuan 2.1 (image unique)</SelectItem>
-              <SelectItem value="mv2">Hunyuan 2mv (4 vues)</SelectItem>
-            </SelectContent>
-          </Select>
+          {kind === "model" && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-1 text-xs text-muted-foreground">Exemples :</span>
+              {PRESETS.map((p) => (
+                <button
+                  key={p.name}
+                  type="button"
+                  onClick={() => applyPreset(p.text)}
+                  title={p.text}
+                  className="rounded-full border border-border bg-secondary/50 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {kind === "model" && (
+            <Select
+              value={backend}
+              onValueChange={(v) => setBackend(v as Backend)}
+            >
+              <SelectTrigger className="w-full" aria-label="Backend">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Backend: auto</SelectItem>
+                <SelectItem value="v21">Hunyuan 2.1 (image unique)</SelectItem>
+                <SelectItem value="mv2">Hunyuan 2mv (4 vues)</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
 
           {error && (
             <p className="rounded-md bg-destructive/15 px-3 py-2 text-sm text-destructive">

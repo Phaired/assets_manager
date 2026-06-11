@@ -248,6 +248,7 @@ impl Runner {
             "multiview" => self.stage_multiview(&cfg, project, &asset),
             "model3d" => self.stage_model3d(&cfg, project, &asset),
             "export" => self.stage_export(project, asset_id),
+            "texture" => self.stage_texture(&cfg, project, &asset),
             other => Err(AppError::msg(format!("etape inconnue: {other}"))),
         };
         if result.is_ok() {
@@ -300,24 +301,43 @@ impl Runner {
 
         let name = asset.get("name").and_then(|x| x.as_str()).unwrap_or("");
         let description = asset.get("description").and_then(|x| x.as_str()).unwrap_or("");
-        let style = self.store.project_style(project).unwrap_or_default();
+        let style = self.store.project_style_block(project).unwrap_or_default();
         let model = cfg.get("openai_model").and_then(|x| x.as_str()).unwrap_or("");
         let quality = cfg
             .get("openai_quality")
             .and_then(|x| x.as_str())
             .unwrap_or("medium");
         let timeout = cfg.get("openai_timeout").and_then(|x| x.as_i64()).unwrap_or(300);
-        let prompt = crate::config::render_multiview_prompt(cfg, name, description, &style);
+        // A per-asset prompt override (if set) replaces the global template;
+        // otherwise render the template with the asset's name/description/style.
+        let prompt = match asset
+            .get("prompt_override")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(p) => p.to_string(),
+            None => crate::config::render_multiview_prompt(cfg, name, description, &style),
+        };
         let output_dir = self.store.multiview_dir(project, asset_id)?;
 
         // Pure-Rust OpenAI call + sheet split (the Python worker is not involved).
         let meta =
             crate::openai::run_multiview(&api_key, &prompt, model, quality, timeout, &output_dir)?;
 
-        let spent = self.store.add_spend(project, est_cost)?;
-
         let mut meta_obj = meta.as_object().cloned().unwrap_or_default();
-        meta_obj.insert("cost".into(), json!(est_cost));
+        // Real cost from the API `usage` block when the model is priced;
+        // fallback to the flat estimate (the budget gate above stays estimate-based).
+        let real_cost = meta_obj
+            .get("usage")
+            .and_then(|u| crate::config::image_cost_from_usage(cfg, model, u));
+        let cost = real_cost.unwrap_or(est_cost);
+        let spent = self.store.add_spend(project, cost)?;
+        meta_obj.insert("cost".into(), json!(cost));
+        meta_obj.insert(
+            "cost_source".into(),
+            json!(if real_cost.is_some() { "api" } else { "estimate" }),
+        );
         meta_obj.insert("estimated_spend_usd".into(), json!(spent));
 
         self.store.update_stage(
@@ -331,11 +351,93 @@ impl Runner {
         Ok(())
     }
 
+    /// Seamless tileable texture (kind == "texture" assets): one OpenAI image
+    /// written to `<asset>/texture.png`. Same budget accounting as multiview.
+    fn stage_texture(&self, cfg: &Value, project: &str, asset: &Value) -> AppResult<()> {
+        let asset_id = asset.get("id").and_then(|x| x.as_str()).unwrap_or("");
+
+        let api_key = crate::config::openai_key(cfg);
+        if api_key.is_empty() {
+            return Err(AppError::msg("OPENAI_API_KEY absent (Reglages ou .env)"));
+        }
+
+        // Budget gate (same accounting as the multiview stage).
+        let state = self.store.load_state(project)?;
+        let current_spend = state
+            .get("estimated_spend_usd")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0);
+        let est_cost = cfg
+            .get("estimated_cost_per_image")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.063);
+        let budget = cfg.get("budget_usd").and_then(|x| x.as_f64()).unwrap_or(5.0);
+        let projected = current_spend + est_cost;
+        if projected > budget + 1e-9 {
+            return Err(AppError::msg(format!(
+                "budget atteint: projete ${projected:.3} > ${budget:.2}"
+            )));
+        }
+
+        let name = asset.get("name").and_then(|x| x.as_str()).unwrap_or("");
+        let description = asset.get("description").and_then(|x| x.as_str()).unwrap_or("");
+        let style = self.store.project_style_block(project).unwrap_or_default();
+        let model = cfg.get("openai_model").and_then(|x| x.as_str()).unwrap_or("");
+        let quality = cfg
+            .get("openai_quality")
+            .and_then(|x| x.as_str())
+            .unwrap_or("medium");
+        let timeout = cfg.get("openai_timeout").and_then(|x| x.as_i64()).unwrap_or(300);
+        // The per-asset prompt override (if set) replaces the texture template.
+        let prompt = match asset
+            .get("prompt_override")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(p) => p.to_string(),
+            None => crate::config::render_texture_prompt(cfg, name, description, &style),
+        };
+        let dest = self.store.texture_path(project, asset_id)?;
+
+        let meta = crate::openai::run_texture(&api_key, &prompt, model, quality, timeout, &dest)?;
+
+        let mut meta_obj = meta.as_object().cloned().unwrap_or_default();
+        // Real cost from the API `usage` block when the model is priced;
+        // fallback to the flat estimate (the budget gate above stays estimate-based).
+        let real_cost = meta_obj
+            .get("usage")
+            .and_then(|u| crate::config::image_cost_from_usage(cfg, model, u));
+        let cost = real_cost.unwrap_or(est_cost);
+        let spent = self.store.add_spend(project, cost)?;
+        meta_obj.insert("cost".into(), json!(cost));
+        meta_obj.insert(
+            "cost_source".into(),
+            json!(if real_cost.is_some() { "api" } else { "estimate" }),
+        );
+        meta_obj.insert("estimated_spend_usd".into(), json!(spent));
+
+        self.store.update_stage(
+            project,
+            asset_id,
+            "texture",
+            "done",
+            None,
+            Some(Value::Object(meta_obj)),
+        )?;
+        Ok(())
+    }
+
     fn stage_model3d(&self, cfg: &Value, project: &str, asset: &Value) -> AppResult<()> {
         let asset_id = asset.get("id").and_then(|x| x.as_str()).unwrap_or("");
         let asset_backend = asset.get("backend").and_then(|x| x.as_str()).unwrap_or("auto");
         let backend = self.supervisor.resolve_backend(asset_backend);
-        let seed = worker::seed_from_id(asset_id);
+        // Per-asset seed override if set, else a deterministic seed from the id.
+        let seed = asset
+            .get("seed")
+            .and_then(|x| x.as_i64())
+            .map(|s| s as u64)
+            .unwrap_or_else(|| worker::seed_from_id(asset_id));
         // Global gen3d defaults, with the per-asset override (snake_case on disk)
         // merged on top so the UI can tune polygon count / steps per asset.
         let gen3d_cfg = cfg.get("gen3d").cloned().unwrap_or(Value::Null);

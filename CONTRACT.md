@@ -280,6 +280,79 @@ queue, and emits `project-changed` (the frontend also invalidates the `["audio",
 query). ElevenLabs endpoints: `/text-to-voice/design`, `/text-to-voice`,
 `/text-to-speech/{voiceId}`, `/sound-generation`, `/music` (model `music_v1`).
 
+## Coherence layer (v0.5) — Project DNA · liens audio · textures · directeur créatif
+
+Added after the audio contract. Four features sharing one goal: every generated
+asset (image, 3D, texture, son) stays coherent with the project identity.
+
+### Project DNA
+`project.json` gains an optional `dna` object (snake_case on disk):
+`{game_description, art_style, palette, ambiance, audio_tone, audio_instrumentation, audio_mood}`.
+Bridge type `ProjectDna` (camelCase); `Project` gains `dna?`. Legacy projects
+without `dna` keep working — the free-text `style` field remains the fallback, and
+`set_project_dna` mirrors `art_style` back into `style` for old builds.
+
+Injection points (all in Rust):
+- multiview + texture prompts: `{style}` placeholder receives
+  `store.project_style_block()` — "Art direction: … Color palette: … Mood: …"
+  composed from the DNA (fallback: legacy `style`).
+- `edit_image`: prompt suffixed with `\nStyle: <style_block>`.
+- sfx/music generation (`audio_jobs.rs`): text suffixed with
+  `. Style: <audio_context>` ("Tone/Instrumentation/Mood" from the DNA). Per-item
+  opt-out: `params.useDna == false`. Voice text is NEVER altered.
+
+Command: `set_project_dna {project, dna}`. UI: `ProjectDnaPanel` (sidebar).
+
+### Liens assets ↔ audio
+`AudioItem` gains optional `asset_id` (disk snake_case, bridge `assetId`) — n:1,
+one source of truth in audio.json. `create_audio_item` accepts `assetId`;
+new command `set_audio_item_asset {project, itemId, assetId|null}` links/unlinks.
+`delete_asset` unlinks (does not delete) the items pointing at the asset.
+UI: `LinkedAudioSection` in AssetDetail (liste + « Générer un son pour cet
+asset » + lier un son existant), badge + délier dans AudioItemDetail.
+
+### Textures tileables
+`Asset` gains `kind: "model" | "texture"` (disk default "model"). Texture assets
+have a SINGLE stage `texture` (state.json key `texture`; `blank_stages_for(kind)`)
+that calls OpenAI generations (1024², template `texture_prompt_template`,
+placeholders `{subject}`/`{style}`, default `DEFAULT_TEXTURE_TEMPLATE`) and writes
+`<asset>/texture.png`. Same budget gate/accounting as multiview;
+`prompt_override` applies. `create_asset` accepts `kind` (optional).
+UI: kind toggle in NewAssetForm, kind filter chips + kind-aware status dots in the
+sidebar (`stagesForKind`), `TexturePreview` (tiling CSS repeat + échelle + export
+PNG) in AssetDetail.
+
+### Coût réel OpenAI (usage-based)
+Every OpenAI call (images generations/edits + chat completions) now reads the
+`usage` block of the response and debits the REAL cost via `add_spend`:
+- price table in config `pricing.{text,image}.<model>` (USD per 1M tokens,
+  prefix-matched against versioned model names; defaults: gpt-image-2 5/8/30,
+  gpt-image-1 5/10/40, gpt-4.1-mini 0.40/1.60).
+- helpers `config::image_cost_from_usage` / `config::text_cost_from_usage`;
+  unknown model or missing usage → fallback to the flat estimates
+  (`estimated_cost_per_image` / `estimated_cost_per_text`), which also remain
+  the basis of the PRE-call budget gate.
+- stage meta gains `usage`, `cost` (real when possible) and
+  `cost_source: "api" | "estimate"`; the StageCard shows the cost of the last
+  run, the header keeps showing the cumulated `estimated_spend_usd`.
+
+### Directeur créatif (OpenAI texte)
+Module `src-tauri/src/openai_text.rs`: `chat_json` = `/v1/chat/completions` with
+strict `json_schema` response format. Config: `openai_text_model`
+(default "gpt-4.1-mini"), `estimated_cost_per_text` (default 0.005, debited via
+`add_spend` with the same budget gate).
+
+Commands:
+- `suggest_prompts {project, assetId?, target:"multiview"|"texture"|"sfx"|"music"}`
+  → `string[]` (3 propositions cohérentes avec le DNA).
+- `ideate_pack {project, brief}` → `PackAssetIdea[]`
+  `{name, description, tags, kind, sounds:[{name,prompt}]}` — the frontend creates
+  the checked assets/sounds itself (`createAsset` + `createAudioItem{assetId}`).
+
+UI: `SuggestButton` (NewAssetForm description, LinkedAudioSection, NewAudioForm),
+`PackIdeationDialog` (sidebar « Idéation IA », création en masse, option
+« lancer la génération »).
+
 ## Capabilities / security
 - Enable `core:event`, `core:window`, dialog/fs/opener as needed.
 - Asset protocol: allow reading from `workspace_dir` so `convertFileSrc` can load

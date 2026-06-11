@@ -118,6 +118,33 @@ pub fn render_multiview_prompt(cfg: &Value, name: &str, description: &str, style
         .and_then(|x| x.as_str())
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(DEFAULT_MULTIVIEW_TEMPLATE);
+    render_subject_style(template, name, description, style)
+}
+
+/// Default seamless-texture prompt template (`kind == "texture"` assets).
+/// Editable in the settings (`texture_prompt_template`); a blank stored value
+/// falls back to this default.
+/// Keep in sync with `TEXTURE_TEMPLATE` in src/lib/constants.ts.
+pub const DEFAULT_TEXTURE_TEMPLATE: &str = "Create a perfectly seamless, tileable texture of {subject}.
+{style}
+TILING: the pattern must tile seamlessly on both axes — no visible seams, borders or repetition artifacts at the edges. Left edge continues the right edge exactly; top edge continues the bottom edge exactly.
+LIGHTING: flat, even, diffuse lighting across the whole image. No vignetting, no lighting gradient, no directional shadow, no specular hotspot.
+VIEW: strictly top-down orthogonal view of a flat surface. The pattern fills the entire frame edge to edge.
+STYLE: clean stylized game texture, readable shapes, simple matte materials suitable for a low-poly game.
+STRICTLY AVOID: text, labels, letters, watermark, frame, border, perspective, horizon, objects casting shadows, photographic noise.";
+
+/// Render the texture prompt from the configured template (same placeholders
+/// as the multiview template: `{subject}` and `{style}`).
+pub fn render_texture_prompt(cfg: &Value, name: &str, description: &str, style: &str) -> String {
+    let template = cfg
+        .get("texture_prompt_template")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DEFAULT_TEXTURE_TEMPLATE);
+    render_subject_style(template, name, description, style)
+}
+
+fn render_subject_style(template: &str, name: &str, description: &str, style: &str) -> String {
     let subject = if !description.trim().is_empty() {
         description.trim()
     } else if !name.trim().is_empty() {
@@ -140,15 +167,33 @@ pub fn defaults() -> Value {
     json!({
         "workspace_dir": data_root().join("workspace").to_string_lossy(),
         "multiview_prompt_template": DEFAULT_MULTIVIEW_TEMPLATE,
+        "texture_prompt_template": DEFAULT_TEXTURE_TEMPLATE,
         "openai_api_key": "",
+        "openai_admin_api_key": "",
         "openai_model": "gpt-image-2",
         "openai_quality": "medium",
         "openai_timeout": 300,
         "openai_max_retries": 2,
+        "openai_text_model": "gpt-4.1-mini",
+        "estimated_cost_per_text": 0.005,
         "budget_usd": 5.0,
         "estimated_cost_per_image": 0.063,
         "default_backend": "v21",
         "elevenlabs_api_key": "",
+        // USD per 1M tokens, by model (prefix-matched against the API model
+        // name). Used to compute the REAL cost from the `usage` block of each
+        // OpenAI response; unknown model → fall back to the flat estimates.
+        "pricing": {
+            "text": {
+                "gpt-4.1-mini": {"input_per_m": 0.40, "output_per_m": 1.60},
+                "gpt-4.1-nano": {"input_per_m": 0.10, "output_per_m": 0.40},
+                "gpt-4.1": {"input_per_m": 2.00, "output_per_m": 8.00}
+            },
+            "image": {
+                "gpt-image-2": {"text_input_per_m": 5.0, "image_input_per_m": 8.0, "output_per_m": 30.0},
+                "gpt-image-1": {"text_input_per_m": 5.0, "image_input_per_m": 10.0, "output_per_m": 40.0}
+            }
+        },
         "audio": {
             "tts_model": "eleven_multilingual_v2",
             "ttv_model": "eleven_multilingual_ttv_v2",
@@ -190,6 +235,65 @@ pub fn defaults() -> Value {
             }
         }
     })
+}
+
+/// Pricing entry for `model` in `cfg.pricing.<section>`: exact key match, else
+/// the LONGEST key the model name starts with (API responses return versioned
+/// names like "gpt-image-2-2026-01-15").
+fn pricing_entry<'a>(cfg: &'a Value, section: &str, model: &str) -> Option<&'a Value> {
+    let table = cfg.get("pricing")?.get(section)?.as_object()?;
+    if let Some(e) = table.get(model) {
+        return Some(e);
+    }
+    table
+        .iter()
+        .filter(|(k, _)| model.starts_with(k.as_str()))
+        .max_by_key(|(k, _)| k.len())
+        .map(|(_, v)| v)
+}
+
+fn per_m(entry: &Value, key: &str) -> f64 {
+    entry.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
+}
+
+/// Real USD cost of a chat completion from its `usage` block
+/// (`{prompt_tokens, completion_tokens}`). None when the model is not priced.
+pub fn text_cost_from_usage(cfg: &Value, model: &str, usage: &Value) -> Option<f64> {
+    let entry = pricing_entry(cfg, "text", model)?;
+    let input = usage.get("prompt_tokens").and_then(|x| x.as_f64())?;
+    let output = usage
+        .get("completion_tokens")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
+    Some((input * per_m(entry, "input_per_m") + output * per_m(entry, "output_per_m")) / 1e6)
+}
+
+/// Real USD cost of an images call from its `usage` block
+/// (`{input_tokens, output_tokens, input_tokens_details:{text_tokens, image_tokens}}`).
+/// None when the model is not priced or the usage block is unusable.
+pub fn image_cost_from_usage(cfg: &Value, model: &str, usage: &Value) -> Option<f64> {
+    let entry = pricing_entry(cfg, "image", model)?;
+    let input = usage.get("input_tokens").and_then(|x| x.as_f64())?;
+    let output = usage
+        .get("output_tokens")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
+    let details = usage.get("input_tokens_details");
+    // Without the details split, count the whole input as text tokens.
+    let image_in = details
+        .and_then(|d| d.get("image_tokens"))
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
+    let text_in = details
+        .and_then(|d| d.get("text_tokens"))
+        .and_then(|x| x.as_f64())
+        .unwrap_or(input - image_in);
+    Some(
+        (text_in * per_m(entry, "text_input_per_m")
+            + image_in * per_m(entry, "image_input_per_m")
+            + output * per_m(entry, "output_per_m"))
+            / 1e6,
+    )
 }
 
 /// Deep-merge `override` over `base` (override wins; dicts merge recursively).
@@ -289,6 +393,24 @@ pub fn openai_key(config: &Value) -> String {
         return from_cfg;
     }
     std::env::var("OPENAI_API_KEY")
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// OpenAI ADMIN key (`sk-admin-…`, organization endpoints: real billed costs).
+/// Config key or `$OPENAI_ADMIN_API_KEY`.
+pub fn openai_admin_key(config: &Value) -> String {
+    let from_cfg = config
+        .get("openai_admin_api_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !from_cfg.is_empty() {
+        return from_cfg;
+    }
+    std::env::var("OPENAI_ADMIN_API_KEY")
         .unwrap_or_default()
         .trim()
         .to_string()

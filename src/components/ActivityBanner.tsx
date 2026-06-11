@@ -5,7 +5,7 @@ import type {
   StageKey,
   StageState,
 } from "../lib/types";
-import { STAGES } from "../lib/constants";
+import { STAGES, TEXTURE_STAGE } from "../lib/constants";
 import { lastLine } from "../lib/format";
 import { cn } from "@/lib/utils";
 
@@ -48,12 +48,13 @@ export function ActivityBanner({
   if (job) {
     const stages: Partial<Record<StageKey, StageState>> =
       bundle?.state?.assets?.[job.assetId] ?? {};
-    const runningKey = STAGES.find(
+    const allDefs = [...STAGES, TEXTURE_STAGE];
+    const runningKey = allDefs.find(
       (x) => stages[x.key]?.status === "running",
     )?.key;
     const stageLabel =
-      STAGES.find((x) => x.key === runningKey)?.label ??
-      STAGES.find((x) => job.stages?.includes(x.key))?.label ??
+      allDefs.find((x) => x.key === runningKey)?.label ??
+      allDefs.find((x) => job.stages?.includes(x.key))?.label ??
       (job.stages ?? []).join(", ");
     return (
       <div

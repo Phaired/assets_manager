@@ -1,15 +1,35 @@
-import { useEffect, useState } from "react";
-import { Loader2, Check, Plus, Search } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  Plus,
+  Search,
+  ArrowUpDown,
+  Image as ImageIcon,
+  Wand2,
+} from "lucide-react";
+import { toast } from "sonner";
 
-import type { ProjectBundle, StageStatus } from "../lib/types";
-import { STAGES } from "../lib/constants";
-import { useSetProjectStyle } from "../lib/queries";
+import type {
+  Asset,
+  AssetKind,
+  ProjectBundle,
+  StageStatus,
+} from "../lib/types";
+import { stageDefsForKind, stagesForKind } from "../lib/constants";
+import { useGenerate } from "../lib/queries";
 import { useAppState } from "../lib/appState";
+import { assetFileUrl } from "../lib/api";
+import { PackIdeationDialog } from "./PackIdeationDialog";
+import { ProjectDnaPanel } from "./ProjectDnaPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
 /** Maps a stage status to the dot color class. */
@@ -21,56 +41,7 @@ const DOT_COLOR: Record<StageStatus, string> = {
   error: "bg-destructive",
 };
 
-/** Free-text style for the whole project — injected into every asset's image
- *  prompt. Saved on blur (or Ctrl/Cmd+Enter). */
-function ProjectStyleField({ project, style }: { project: string; style: string }) {
-  const setStyle = useSetProjectStyle(project);
-  const [value, setValue] = useState(style);
-  const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    setValue(style);
-    setSaved(false);
-  }, [project, style]);
-
-  function commit() {
-    if (value === style) return;
-    setStyle.mutate(value, {
-      onSuccess: () => {
-        setSaved(true);
-        window.setTimeout(() => setSaved(false), 1500);
-      },
-    });
-  }
-
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Label htmlFor="project-style" className="text-muted-foreground">
-        Style du projet
-        {setStyle.isPending && <Loader2 size={12} className="animate-spin" />}
-        {saved && !setStyle.isPending && (
-          <span className="flex items-center gap-1 text-ok">
-            <Check size={12} /> enregistré
-          </span>
-        )}
-      </Label>
-      <Textarea
-        id="project-style"
-        rows={2}
-        placeholder="ex. low-poly, couleurs vives, matériaux mats…"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-            e.preventDefault();
-            commit();
-          }
-        }}
-      />
-    </div>
-  );
-}
+type SortKey = "date" | "name" | "status";
 
 function stageStatus(
   bundle: ProjectBundle | null,
@@ -84,8 +55,65 @@ function stageStatus(
   );
 }
 
-/** 3D-section contents of the sidebar: new-asset action, filterable asset
- *  list, project style. The creation form itself lives in the main pane
+/** Sort rank by aggregate status: active first, then errors, partial, done, idle. */
+function statusRank(bundle: ProjectBundle | null, asset: Asset): number {
+  const statuses = stagesForKind(asset.kind).map((s) =>
+    stageStatus(bundle, asset.id, s),
+  );
+  if (statuses.some((s) => s === "running" || s === "queued")) return 0;
+  if (statuses.some((s) => s === "error")) return 1;
+  if (statuses.every((s) => s === "done")) return 2;
+  if (statuses.some((s) => s === "done")) return 3;
+  return 4;
+}
+
+/** Small thumbnail once the image stage is done: multiview front.png for model
+ *  assets, texture.png for texture assets. */
+function AssetThumb({
+  project,
+  assetId,
+  rel,
+  ready,
+  version,
+}: {
+  project: string;
+  assetId: string;
+  rel: string;
+  ready: boolean;
+  version: string;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    if (!ready) {
+      setUrl(null);
+      return;
+    }
+    assetFileUrl(project, assetId, rel)
+      .then((u) => {
+        if (active) setUrl(`${u}?t=${encodeURIComponent(version)}`);
+      })
+      .catch(() => {
+        if (active) setUrl(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [project, assetId, rel, ready, version]);
+
+  return (
+    <span className="flex size-7 shrink-0 items-center justify-center overflow-hidden rounded border border-border bg-muted">
+      {url ? (
+        <img src={url} alt="" className="size-full object-cover" />
+      ) : (
+        <ImageIcon size={12} className="text-muted-foreground/50" aria-hidden />
+      )}
+    </span>
+  );
+}
+
+/** 3D-section contents of the sidebar: new-asset action, sortable/filterable
+ *  asset list, project style. The creation form itself lives in the main pane
  *  (shown when no asset is selected), mirroring the audio section. */
 export function Assets3dSidebar({
   bundle,
@@ -95,47 +123,191 @@ export function Assets3dSidebar({
   loading: boolean;
 }) {
   const { project, assetId, setAssetId } = useAppState();
+  const generate = useGenerate(project);
   const assets = bundle?.project.assets ?? [];
   const [filter, setFilter] = useState("");
+  const [sort, setSort] = useState<SortKey>("date");
+  const [activeTags, setActiveTags] = useState<string[]>([]);
+  const [kindFilter, setKindFilter] = useState<AssetKind | null>(null);
+
+  // Assets with at least one stage not yet done — candidates for "generate all".
+  const pendingAssets = useMemo(
+    () =>
+      assets.filter((a) =>
+        stagesForKind(a.kind).some(
+          (s) => stageStatus(bundle, a.id, s) !== "done",
+        ),
+      ),
+    [assets, bundle],
+  );
+
+  // Enqueue only the non-done stages per asset (so a finished — and paid —
+  // multiview is never re-run).
+  function generateAllPending() {
+    let count = 0;
+    for (const a of pendingAssets) {
+      const stages = stagesForKind(a.kind).filter(
+        (s) => stageStatus(bundle, a.id, s) !== "done",
+      );
+      if (!stages.length) continue;
+      generate.mutate({ assetId: a.id, stages });
+      count++;
+    }
+    if (count) toast.success(`${count} asset(s) en file`);
+  }
+
+  // All distinct tags across the project's assets (for the filter chips).
+  const allTags = useMemo(() => {
+    const set = new Set<string>();
+    for (const a of assets) for (const t of a.tags) set.add(t);
+    return Array.from(set).sort((x, y) => x.localeCompare(y));
+  }, [assets]);
+
+  function toggleTag(tag: string) {
+    setActiveTags((cur) =>
+      cur.includes(tag) ? cur.filter((t) => t !== tag) : [...cur, tag],
+    );
+  }
 
   const needle = filter.trim().toLowerCase();
-  const visible = needle
-    ? assets.filter((a) => a.name.toLowerCase().includes(needle))
-    : assets;
+  const hasTextures = assets.some((a) => a.kind === "texture");
+  const visible = useMemo(() => {
+    let out: Asset[] = assets.filter((a) => {
+      if (needle && !a.name.toLowerCase().includes(needle)) return false;
+      if (kindFilter && a.kind !== kindFilter) return false;
+      // OR semantics: keep assets carrying at least one selected tag.
+      if (activeTags.length && !a.tags.some((t) => activeTags.includes(t)))
+        return false;
+      return true;
+    });
+    out = [...out].sort((a, b) => {
+      if (sort === "name") return a.name.localeCompare(b.name);
+      if (sort === "status")
+        return statusRank(bundle, a) - statusRank(bundle, b);
+      // date (newest first)
+      return (b.createdAt ?? "").localeCompare(a.createdAt ?? "");
+    });
+    return out;
+  }, [assets, needle, kindFilter, activeTags, sort, bundle]);
 
   return (
     <>
-      <Button
-        size="sm"
-        disabled={!project}
-        onClick={() => setAssetId(null)}
-        title="Créer un nouvel asset"
-      >
-        <Plus size={14} /> Nouvel asset
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          className="flex-1"
+          disabled={!project}
+          onClick={() => setAssetId(null)}
+          title="Créer un nouvel asset"
+        >
+          <Plus size={14} /> Nouvel asset
+        </Button>
+        {pendingAssets.length > 0 && (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={generateAllPending}
+            disabled={generate.isPending}
+            title="Lance les étapes manquantes de tous les assets non terminés"
+          >
+            <Wand2 size={14} /> Tout ({pendingAssets.length})
+          </Button>
+        )}
+      </div>
 
       <div className="flex min-h-0 grow flex-col gap-2">
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium text-muted-foreground">Assets</span>
           <span className="text-xs text-muted-foreground">
-            {needle ? `${visible.length}/${assets.length}` : assets.length}
+            {needle || activeTags.length || kindFilter
+              ? `${visible.length}/${assets.length}`
+              : assets.length}
           </span>
         </div>
 
-        {assets.length > 5 && (
-          <div className="relative">
-            <Search
-              size={14}
-              className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted-foreground"
-              aria-hidden
-            />
-            <Input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filtrer…"
-              aria-label="Filtrer les assets"
-              className="h-8 pl-8"
-            />
+        {assets.length > 1 && (
+          <div className="flex items-center gap-2">
+            {assets.length > 5 && (
+              <div className="relative flex-1">
+                <Search
+                  size={14}
+                  className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted-foreground"
+                  aria-hidden
+                />
+                <Input
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                  placeholder="Filtrer…"
+                  aria-label="Filtrer les assets"
+                  className="h-8 pl-8"
+                />
+              </div>
+            )}
+            <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
+              <SelectTrigger
+                className="h-8 w-[110px] text-xs"
+                aria-label="Trier les assets"
+              >
+                <ArrowUpDown size={13} className="text-muted-foreground" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="date">Date</SelectItem>
+                <SelectItem value="name">Nom</SelectItem>
+                <SelectItem value="status">Statut</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+
+        {hasTextures && (
+          <div className="flex gap-1">
+            {(
+              [
+                ["model", "3D"],
+                ["texture", "Textures"],
+              ] as Array<[AssetKind, string]>
+            ).map(([k, label]) => {
+              const on = kindFilter === k;
+              return (
+                <button
+                  key={k}
+                  onClick={() => setKindFilter(on ? null : k)}
+                  className={cn(
+                    "rounded-full border px-2 py-0.5 text-xs transition-colors",
+                    on
+                      ? "border-primary bg-primary/15 text-foreground"
+                      : "border-border text-muted-foreground hover:bg-muted",
+                  )}
+                  aria-pressed={on}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {allTags.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {allTags.map((tag) => {
+              const on = activeTags.includes(tag);
+              return (
+                <button
+                  key={tag}
+                  onClick={() => toggleTag(tag)}
+                  className={cn(
+                    "rounded-full border px-2 py-0.5 text-xs transition-colors",
+                    on
+                      ? "border-primary bg-primary/15 text-foreground"
+                      : "border-border text-muted-foreground hover:bg-muted",
+                  )}
+                  aria-pressed={on}
+                >
+                  {tag}
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -162,11 +334,16 @@ export function Assets3dSidebar({
           )}
           {visible.map((a) => {
             const active = a.id === assetId;
+            const isTexture = a.kind === "texture";
+            const thumbStage = isTexture ? "texture" : "multiview";
+            const thumbDone = stageStatus(bundle, a.id, thumbStage) === "done";
+            const thumbVer =
+              bundle?.state?.assets?.[a.id]?.[thumbStage]?.updatedAt ?? "0";
             return (
               <button
                 key={a.id}
                 className={cn(
-                  "relative flex items-center justify-between gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm transition-colors",
+                  "relative flex items-center gap-2 overflow-hidden rounded-md px-2 py-1.5 text-left text-sm transition-colors",
                   active
                     ? "bg-primary/15 text-foreground"
                     : "text-foreground hover:bg-muted",
@@ -179,9 +356,16 @@ export function Assets3dSidebar({
                     className="absolute inset-y-0 left-0 w-[3px] bg-primary"
                   />
                 )}
-                <span className="truncate">{a.name}</span>
+                <AssetThumb
+                  project={project as string}
+                  assetId={a.id}
+                  rel={isTexture ? "texture.png" : "multiview/front.png"}
+                  ready={thumbDone}
+                  version={String(thumbVer)}
+                />
+                <span className="min-w-0 flex-1 truncate">{a.name}</span>
                 <span className="flex shrink-0 items-center gap-1" aria-hidden>
-                  {STAGES.map((s) => {
+                  {stageDefsForKind(a.kind).map((s) => {
                     const status = stageStatus(bundle, a.id, s.key);
                     return (
                       <span
@@ -199,7 +383,10 @@ export function Assets3dSidebar({
       </div>
 
       {project && bundle && (
-        <ProjectStyleField project={project} style={bundle.project.style} />
+        <div className="flex flex-col gap-1.5">
+          <PackIdeationDialog project={project} />
+          <ProjectDnaPanel projectName={project} project={bundle.project} />
+        </div>
       )}
     </>
   );

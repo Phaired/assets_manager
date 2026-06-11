@@ -173,6 +173,26 @@ impl Runner {
             .audio_file_path(&job.project, &item.kind, &item.id)?;
         let rel = Store::audio_file_rel(&item.kind, &item.id);
 
+        // Project DNA audio context, appended to sfx/music prompts (never to the
+        // spoken voice text). Opt-out per item via params.useDna = false.
+        let use_dna = item
+            .params
+            .get("useDna")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(true);
+        let dna_ctx = if use_dna && item.kind != "voice" {
+            self.store
+                .project_audio_context(&job.project)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let gen_text = if dna_ctx.is_empty() {
+            item.text.clone()
+        } else {
+            format!("{}. Style: {}", item.text.trim_end_matches('.'), dna_ctx)
+        };
+
         match item.kind.as_str() {
             "voice" => {
                 let voice_id = item
@@ -213,7 +233,7 @@ impl Runner {
                     .and_then(|x| x.as_bool())
                     .unwrap_or(false);
                 self.eleven
-                    .sfx(&api_key, &item.text, model, output_format, dur, infl, looped, &dest)?;
+                    .sfx(&api_key, &gen_text, model, output_format, dur, infl, looped, &dest)?;
             }
             "music" => {
                 let model = audio
@@ -222,7 +242,7 @@ impl Runner {
                     .unwrap_or("music_v1");
                 let ms = item.params.get("musicLengthMs").and_then(|x| x.as_i64());
                 self.eleven
-                    .music(&api_key, &item.text, model, output_format, ms, &dest)?;
+                    .music(&api_key, &gen_text, model, output_format, ms, &dest)?;
             }
             other => return Err(AppError::msg(format!("type audio inconnu: {other}"))),
         }

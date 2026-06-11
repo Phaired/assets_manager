@@ -8,6 +8,7 @@ import {
   useCreateAudioItem,
   useGenerateAudioItem,
 } from "../lib/queries";
+import { SuggestButton } from "./SuggestButton";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -148,7 +149,16 @@ export function NewAudioForm({
             </TabsContent>
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="audio-text">{promptLabel}</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="audio-text">{promptLabel}</Label>
+                {kind !== "voice" && project && (
+                  <SuggestButton
+                    project={project}
+                    target={kind === "music" ? "music" : "sfx"}
+                    onPick={setText}
+                  />
+                )}
+              </div>
               <Textarea
                 id="audio-text"
                 placeholder={promptPlaceholder}

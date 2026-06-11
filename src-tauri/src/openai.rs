@@ -64,20 +64,22 @@ fn decode_image_response(
     Err(AppError::msg("réponse OpenAI sans b64_json ni url"))
 }
 
-/// POST /v1/images/generations — returns the raw PNG bytes of the 2x2 sheet.
-fn request_sheet(
+/// POST /v1/images/generations — returns the raw PNG bytes of one image plus
+/// the response `usage` block (token counts, for real-cost accounting).
+fn request_generation(
     api_key: &str,
     prompt: &str,
     model: &str,
     quality: &str,
+    size: &str,
     timeout_s: i64,
-) -> AppResult<Vec<u8>> {
+) -> AppResult<(Vec<u8>, Option<Value>)> {
     let client = client(timeout_s)?;
     let payload = json!({
         "model": model,
         "prompt": prompt,
         "n": 1,
-        "size": "1536x1024",
+        "size": size,
         "quality": quality,
         "output_format": "png",
     });
@@ -94,7 +96,8 @@ fn request_sheet(
         ));
     }
     let value: Value = resp.json()?;
-    decode_image_response(&value, &client)
+    let bytes = decode_image_response(&value, &client)?;
+    Ok((bytes, value.get("usage").cloned()))
 }
 
 /// Pad to a square on light gray, then resize to 1024² (Lanczos).
@@ -142,16 +145,45 @@ pub fn run_multiview(
     timeout_s: i64,
     output_dir: &Path,
 ) -> AppResult<Value> {
-    let bytes = request_sheet(api_key, prompt, model, quality, timeout_s)?;
+    let (bytes, usage) =
+        request_generation(api_key, prompt, model, quality, "1536x1024", timeout_s)?;
     split_sheet(&bytes, output_dir)?;
     let mut files = vec!["sheet.png".to_string()];
     files.extend(VIEW_FILES.iter().map(|s| s.to_string()));
-    Ok(json!({"model": model, "quality": quality, "files": files}))
+    let mut meta = json!({"model": model, "quality": quality, "files": files});
+    if let Some(u) = usage {
+        meta.as_object_mut().unwrap().insert("usage".into(), u);
+    }
+    Ok(meta)
+}
+
+/// Generate a seamless tileable texture (1024²) and write it to `dest`.
+/// Returns the stage meta — cost accounting stays in the job manager.
+pub fn run_texture(
+    api_key: &str,
+    prompt: &str,
+    model: &str,
+    quality: &str,
+    timeout_s: i64,
+    dest: &Path,
+) -> AppResult<Value> {
+    let (bytes, usage) =
+        request_generation(api_key, prompt, model, quality, "1024x1024", timeout_s)?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, &bytes)
+        .map_err(|e| AppError::msg(format!("écriture {}: {e}", dest.display())))?;
+    let mut meta = json!({"model": model, "quality": quality, "file": "texture.png"});
+    if let Some(u) = usage {
+        meta.as_object_mut().unwrap().insert("usage".into(), u);
+    }
+    Ok(meta)
 }
 
 /// POST /v1/images/edits (multipart; optional inpainting mask whose transparent
-/// pixels delimit the editable region). Returns the edited PNG bytes — the
-/// caller decides where to write them.
+/// pixels delimit the editable region). Returns the edited PNG bytes plus the
+/// response `usage` block — the caller decides where to write them.
 #[allow(clippy::too_many_arguments)]
 pub fn edit_image(
     api_key: &str,
@@ -162,7 +194,7 @@ pub fn edit_image(
     quality: &str,
     timeout_s: i64,
     mask_path: Option<&Path>,
-) -> AppResult<Vec<u8>> {
+) -> AppResult<(Vec<u8>, Option<Value>)> {
     use reqwest::blocking::multipart::{Form, Part};
 
     let client = client(timeout_s)?;
@@ -207,5 +239,6 @@ pub fn edit_image(
         ));
     }
     let value: Value = resp.json()?;
-    decode_image_response(&value, &client)
+    let bytes = decode_image_response(&value, &client)?;
+    Ok((bytes, value.get("usage").cloned()))
 }

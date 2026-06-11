@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
-use crate::types::{AudioItem, Voice, STAGES, VIEW_FILES};
+use crate::types::{AudioItem, ProjectDna, Voice, STAGES, TEXTURE_STAGES, VIEW_FILES};
 
 /// Re-entrant global lock matching the Python `_LOCK` (RLock).
 static LOCK: ReentrantMutex<()> = ReentrantMutex::new(());
@@ -79,6 +79,11 @@ impl Store {
 
     pub fn source_image_path(&self, project: &str, asset_id: &str) -> AppResult<PathBuf> {
         Ok(self.asset_dir(project, asset_id)?.join("source.png"))
+    }
+
+    /// Generated seamless texture of a `kind == "texture"` asset.
+    pub fn texture_path(&self, project: &str, asset_id: &str) -> AppResult<PathBuf> {
+        Ok(self.asset_dir(project, asset_id)?.join("texture.png"))
     }
 
     pub fn obj_path(&self, project: &str, asset_id: &str) -> AppResult<PathBuf> {
@@ -211,6 +216,7 @@ impl Store {
         description: &str,
         tags: Vec<String>,
         backend: &str,
+        kind: &str,
     ) -> AppResult<Value> {
         let _guard = LOCK.lock();
         let mut data = self.get_project(project)?;
@@ -235,6 +241,7 @@ impl Store {
             "name": name,
             "description": description,
             "tags": tags,
+            "kind": kind,
             "backend": backend,
             "source": "openai",
             "created_at": now(),
@@ -246,7 +253,7 @@ impl Store {
         self.save_project(project, &data)?;
         // initialise state
         let mut state = self.load_state(project)?;
-        let stages = blank_stages();
+        let stages = blank_stages_for(kind);
         state
             .get_mut("assets")
             .and_then(|a| a.as_object_mut())
@@ -271,6 +278,8 @@ impl Store {
         if adir.is_dir() {
             let _ = std::fs::remove_dir_all(&adir);
         }
+        // Linked audio items survive the asset, just unlinked.
+        self.unlink_audio_items(project, asset_id)?;
         Ok(())
     }
 
@@ -292,6 +301,53 @@ impl Store {
             .ok_or_else(|| AppError::msg("project.json corrompu"))?
             .insert("style".into(), Value::String(style.to_string()));
         self.save_project(project, &data)
+    }
+
+    /// Read the project's DNA (None on legacy projects without one).
+    pub fn project_dna(&self, project: &str) -> AppResult<Option<ProjectDna>> {
+        let data = self.get_project(project)?;
+        Ok(data
+            .get("dna")
+            .filter(|d| d.is_object())
+            .map(ProjectDna::from_disk))
+    }
+
+    /// Persist the project's DNA. Also mirrors `art_style` into the legacy
+    /// `style` field so old builds and the `{style}` fallback stay coherent.
+    pub fn set_project_dna(&self, project: &str, dna: &ProjectDna) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let mut data = self.get_project(project)?;
+        let obj = data
+            .as_object_mut()
+            .ok_or_else(|| AppError::msg("project.json corrompu"))?;
+        obj.insert("dna".into(), dna.to_disk());
+        obj.insert("style".into(), Value::String(dna.art_style.trim().to_string()));
+        self.save_project(project, &data)
+    }
+
+    /// Composed visual style block injected into the `{style}` placeholder of
+    /// image prompt templates. DNA present → composed art/palette/mood block;
+    /// DNA absent → the legacy free-text `style`.
+    pub fn project_style_block(&self, project: &str) -> AppResult<String> {
+        match self.project_dna(project)? {
+            Some(dna) => {
+                let block = dna.style_block();
+                if block.is_empty() {
+                    self.project_style(project)
+                } else {
+                    Ok(block)
+                }
+            }
+            None => self.project_style(project),
+        }
+    }
+
+    /// Composed audio context appended to SFX/music prompts ("" when no DNA).
+    pub fn project_audio_context(&self, project: &str) -> AppResult<String> {
+        Ok(self
+            .project_dna(project)?
+            .map(|dna| dna.audio_context())
+            .unwrap_or_default())
     }
 
     /// Set (or clear, when `override_obj` is empty) the per-asset gen3d override
@@ -357,6 +413,126 @@ impl Store {
             });
         }
         self.save_project(project, &data)
+    }
+
+    /// Set a single field on an asset (mutates project.json). The `value`
+    /// callback receives the asset object to mutate (e.g. insert / remove a key).
+    fn mutate_asset(
+        &self,
+        project: &str,
+        asset_id: &str,
+        f: impl FnOnce(&mut serde_json::Map<String, Value>),
+    ) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let mut data = self.get_project(project)?;
+        let mut found = false;
+        if let Some(arr) = data.get_mut("assets").and_then(|a| a.as_array_mut()) {
+            for asset in arr.iter_mut() {
+                if asset.get("id").and_then(|x| x.as_str()) == Some(asset_id) {
+                    if let Some(o) = asset.as_object_mut() {
+                        f(o);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            return Err(AppError::AssetNotFound {
+                project: project.to_string(),
+                asset_id: asset_id.to_string(),
+            });
+        }
+        self.save_project(project, &data)
+    }
+
+    /// Rename an asset's display `name` (the `id`/slug — and thus disk paths — is
+    /// intentionally left unchanged so generated files stay valid).
+    pub fn set_asset_name(&self, project: &str, asset_id: &str, name: &str) -> AppResult<()> {
+        self.mutate_asset(project, asset_id, |o| {
+            o.insert("name".into(), Value::String(name.to_string()));
+        })
+    }
+
+    /// Replace an asset's tags.
+    pub fn set_asset_tags(&self, project: &str, asset_id: &str, tags: Vec<String>) -> AppResult<()> {
+        self.mutate_asset(project, asset_id, |o| {
+            o.insert(
+                "tags".into(),
+                Value::Array(tags.into_iter().map(Value::String).collect()),
+            );
+        })
+    }
+
+    /// Set (or clear, when `seed` is None) the per-asset 3D seed override. When
+    /// absent, generation derives a deterministic seed from the asset id.
+    pub fn set_asset_seed(&self, project: &str, asset_id: &str, seed: Option<i64>) -> AppResult<()> {
+        self.mutate_asset(project, asset_id, |o| match seed {
+            Some(s) => {
+                o.insert("seed".into(), Value::from(s));
+            }
+            None => {
+                o.remove("seed");
+            }
+        })
+    }
+
+    /// Set (or clear, when empty) the per-asset multiview prompt override. When
+    /// present it replaces the global template for the multiview stage.
+    pub fn set_asset_prompt(&self, project: &str, asset_id: &str, prompt: &str) -> AppResult<()> {
+        let prompt = prompt.trim().to_string();
+        self.mutate_asset(project, asset_id, |o| {
+            if prompt.is_empty() {
+                o.remove("prompt_override");
+            } else {
+                o.insert("prompt_override".into(), Value::String(prompt));
+            }
+        })
+    }
+
+    /// Duplicate an asset's *configuration* into a new asset (fresh pipeline, no
+    /// generated files copied). Name gets a " (copie)" suffix; the new id is a
+    /// deduplicated slug. Returns the new asset object.
+    pub fn duplicate_asset(&self, project: &str, asset_id: &str) -> AppResult<Value> {
+        // Read the source config (outside the LOCK held by add_asset).
+        let src = self.get_asset(project, asset_id)?;
+        let name = src.get("name").and_then(|x| x.as_str()).unwrap_or("asset");
+        let description = src.get("description").and_then(|x| x.as_str()).unwrap_or("");
+        let tags: Vec<String> = src
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let backend = src.get("backend").and_then(|x| x.as_str()).unwrap_or("auto");
+        let kind = src.get("kind").and_then(|x| x.as_str()).unwrap_or("model");
+
+        let new = self.add_asset(
+            project,
+            &format!("{name} (copie)"),
+            description,
+            tags,
+            backend,
+            kind,
+        )?;
+        let new_id = new.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+
+        // Carry over the optional gen3d override + seed + prompt override.
+        if let Some(over) = src.get("gen3d").cloned() {
+            self.mutate_asset(project, &new_id, |o| {
+                o.insert("gen3d".into(), over);
+            })?;
+        }
+        if let Some(seed) = src.get("seed").and_then(|x| x.as_i64()) {
+            self.set_asset_seed(project, &new_id, Some(seed))?;
+        }
+        if let Some(p) = src.get("prompt_override").and_then(|x| x.as_str()) {
+            self.set_asset_prompt(project, &new_id, p)?;
+        }
+        self.get_asset(project, &new_id)
     }
 
     pub fn set_asset_source(&self, project: &str, asset_id: &str, source: &str) -> AppResult<()> {
@@ -562,6 +738,7 @@ impl Store {
         name: &str,
         text: &str,
         voice_id: Option<&str>,
+        asset_id: Option<&str>,
         params: Value,
     ) -> AppResult<AudioItem> {
         let _guard = LOCK.lock();
@@ -590,6 +767,7 @@ impl Store {
             "name": name,
             "text": text,
             "voice_id": voice_id.unwrap_or(""),
+            "asset_id": asset_id.unwrap_or(""),
             "params": params,
             "status": "pending",
             "error": null,
@@ -629,6 +807,58 @@ impl Store {
             if p.is_file() {
                 let _ = std::fs::remove_file(p);
             }
+        }
+        Ok(())
+    }
+
+    /// Link (or unlink, when `asset_id` is None) an audio item to an asset.
+    pub fn set_audio_item_asset(
+        &self,
+        project: &str,
+        item_id: &str,
+        asset_id: Option<&str>,
+    ) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let mut data = self.load_audio_raw(project)?;
+        let mut found = false;
+        if let Some(arr) = data.get_mut("items").and_then(|x| x.as_array_mut()) {
+            for it in arr.iter_mut() {
+                if it.get("id").and_then(|x| x.as_str()) == Some(item_id) {
+                    if let Some(o) = it.as_object_mut() {
+                        o.insert(
+                            "asset_id".into(),
+                            Value::String(asset_id.unwrap_or("").to_string()),
+                        );
+                    }
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            return Err(AppError::msg(format!("item audio introuvable: {item_id}")));
+        }
+        self.save_audio_raw(project, &data)
+    }
+
+    /// Unlink every audio item pointing at `asset_id` (used when the asset is
+    /// deleted — the generated mp3 files are kept).
+    fn unlink_audio_items(&self, project: &str, asset_id: &str) -> AppResult<()> {
+        let _guard = LOCK.lock();
+        let mut data = self.load_audio_raw(project)?;
+        let mut changed = false;
+        if let Some(arr) = data.get_mut("items").and_then(|x| x.as_array_mut()) {
+            for it in arr.iter_mut() {
+                if it.get("asset_id").and_then(|x| x.as_str()) == Some(asset_id) {
+                    if let Some(o) = it.as_object_mut() {
+                        o.insert("asset_id".into(), Value::String(String::new()));
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save_audio_raw(project, &data)?;
         }
         Ok(())
     }
@@ -760,4 +990,18 @@ pub fn blank_stages() -> Value {
         m.insert(s.to_string(), blank_stage());
     }
     Value::Object(m)
+}
+
+/// Blank stages for an asset kind: texture assets get the single `texture`
+/// stage, model assets the full multiview/model3d/export pipeline.
+pub fn blank_stages_for(kind: &str) -> Value {
+    if kind == "texture" {
+        let mut m = serde_json::Map::new();
+        for s in TEXTURE_STAGES {
+            m.insert(s.to_string(), blank_stage());
+        }
+        Value::Object(m)
+    } else {
+        blank_stages()
+    }
 }

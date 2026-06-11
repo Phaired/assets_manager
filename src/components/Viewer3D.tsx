@@ -8,14 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { Canvas, useThree } from "@react-three/fiber";
-import {
-  OrbitControls,
-  Grid,
-  Center,
-  Bounds,
-  useGLTF,
-  Html,
-} from "@react-three/drei";
+import { OrbitControls, Grid, Center, Bounds, useGLTF, Html } from "@react-three/drei";
 import * as THREE from "three";
 import {
   RotateCcw,
@@ -25,29 +18,52 @@ import {
   Loader2,
   AlertTriangle,
   Sun,
+  Camera,
+  Ruler,
+  Palette,
 } from "lucide-react";
+import { toast } from "sonner";
+import { save } from "@tauri-apps/plugin-dialog";
 import type { ComponentRef } from "react";
+
+import { saveRender } from "../lib/api";
 
 type OrbitControlsImpl = ComponentRef<typeof OrbitControls>;
 
 export interface MeshStats {
   faces: number;
   vertices: number;
+  /** Model bounding-box size (world units) — for the dimensions readout. */
+  size: { x: number; y: number; z: number };
 }
 
-/** Loads a GLTF/GLB and reports geometry stats + wireframe toggle. */
+/** Local lighting presets (no remote HDR — keeps the viewer offline-safe). Each
+ *  is scaled by the brightness slider on top. */
+const LIGHT_PRESETS = {
+  studio: { label: "Studio", ambient: 0.45, hemi: 0.6, key: 1.1, fill: 0.35, bg: "#171411" },
+  doux: { label: "Doux", ambient: 0.7, hemi: 0.85, key: 0.6, fill: 0.4, bg: "#1c1a17" },
+  vif: { label: "Vif", ambient: 0.35, hemi: 0.5, key: 1.6, fill: 0.5, bg: "#14110e" },
+  sombre: { label: "Sombre", ambient: 0.18, hemi: 0.3, key: 0.9, fill: 0.15, bg: "#0b0907" },
+} as const;
+type PresetKey = keyof typeof LIGHT_PRESETS;
+
+/** Loads a GLTF/GLB and reports geometry stats + wireframe / unlit / box toggles. */
 function Model({
   url,
   wireframe,
+  unlit,
+  showBox,
   onStats,
 }: {
   url: string;
   wireframe: boolean;
+  unlit: boolean;
+  showBox: boolean;
   onStats: (s: MeshStats) => void;
 }) {
   const gltf = useGLTF(url);
 
-  const { scene, stats } = useMemo(() => {
+  const { scene, box, stats } = useMemo(() => {
     let faces = 0;
     let vertices = 0;
     const cloned = gltf.scene.clone(true);
@@ -61,33 +77,43 @@ function Model({
         else if (pos) faces += pos.count / 3;
       }
     });
-    return { scene: cloned, stats: { faces: Math.round(faces), vertices } };
+    const box = new THREE.Box3().setFromObject(cloned);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    return {
+      scene: cloned,
+      box,
+      stats: {
+        faces: Math.round(faces),
+        vertices,
+        size: { x: size.x, y: size.y, z: size.z },
+      },
+    };
   }, [gltf.scene]);
 
-  // Apply wireframe + an emissive floor (the texture lights itself a bit so shadow
-  // sides are never black) to all standard materials.
+  // Apply wireframe + emissive (the texture lights itself a bit so shadow sides
+  // are never black; "unlit" pushes it to full albedo) to all standard materials.
   useEffect(() => {
     scene.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
       if (mesh.isMesh && mesh.material) {
-        const mats = Array.isArray(mesh.material)
-          ? mesh.material
-          : [mesh.material];
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
         for (const m of mats) {
           const sm = m as THREE.MeshStandardMaterial;
           sm.wireframe = wireframe;
           if (sm.map) {
             // Self-illuminate from the albedo so the model always reads bright,
             // independent of scene lighting (good for vivid game/Roblox previews).
+            // "unlit" cranks it to 1.0 to inspect the raw texture.
             sm.emissiveMap = sm.map;
             sm.emissive = new THREE.Color(0xffffff);
-            sm.emissiveIntensity = 0.35;
+            sm.emissiveIntensity = unlit ? 1.0 : 0.35;
             sm.needsUpdate = true;
           }
         }
       }
     });
-  }, [scene, wireframe]);
+  }, [scene, wireframe, unlit]);
 
   useEffect(() => {
     onStats(stats);
@@ -97,6 +123,7 @@ function Model({
     <Bounds fit clip observe margin={1.2}>
       <Center>
         <primitive object={scene} />
+        {showBox && <box3Helper args={[box, new THREE.Color(0xe39a4a)]} />}
       </Center>
     </Bounds>
   );
@@ -146,16 +173,23 @@ class ModelErrorBoundary extends Component<
 export function Viewer3D({
   src,
   height = 420,
+  name = "render",
 }: {
   src: string | null;
   height?: number;
+  /** Base filename suggested in the screenshot save dialog. */
+  name?: string;
 }) {
   const [wireframe, setWireframe] = useState(false);
   const [autoRotate, setAutoRotate] = useState(true);
   const [grid, setGrid] = useState(true);
   const [brightness, setBrightness] = useState(1.3);
+  const [preset, setPreset] = useState<PresetKey>("studio");
+  const [unlit, setUnlit] = useState(false);
+  const [showDims, setShowDims] = useState(false);
   const [stats, setStats] = useState<MeshStats | null>(null);
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
+  const glRef = useRef<THREE.WebGLRenderer | null>(null);
 
   // Reset stats when the source changes.
   useEffect(() => {
@@ -165,6 +199,31 @@ export function Viewer3D({
   function resetCamera() {
     controlsRef.current?.reset();
   }
+
+  // Capture the current frame to a PNG via a native "Save As" dialog. The canvas
+  // keeps its buffer (preserveDrawingBuffer) so toDataURL always has the frame.
+  async function capture() {
+    const gl = glRef.current;
+    if (!gl) return;
+    const dataUrl = gl.domElement.toDataURL("image/png");
+    const dest = await save({
+      defaultPath: `${name}.png`,
+      filters: [{ name: "Image PNG", extensions: ["png"] }],
+    });
+    if (typeof dest !== "string") return;
+    const b64 = dataUrl.split(",")[1] ?? "";
+    const bin = atob(b64);
+    const bytes = new Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    try {
+      await saveRender(dest, bytes);
+      toast.success("Capture enregistrée");
+    } catch (e) {
+      toast.error(`Échec de la capture : ${e}`);
+    }
+  }
+
+  const p = LIGHT_PRESETS[preset];
 
   return (
     <div className="viewer3d" style={{ height }}>
@@ -186,6 +245,14 @@ export function Viewer3D({
           <Boxes size={14} /> Wireframe
         </button>
         <button
+          className={"vbtn" + (unlit ? " on" : "")}
+          onClick={() => setUnlit((v) => !v)}
+          title="Afficher la texture pure (sans éclairage)"
+          aria-pressed={unlit}
+        >
+          <Palette size={14} /> Texture
+        </button>
+        <button
           className={"vbtn" + (grid ? " on" : "")}
           onClick={() => setGrid((v) => !v)}
           title="Grille"
@@ -193,9 +260,39 @@ export function Viewer3D({
         >
           <Grid3x3 size={14} /> Grille
         </button>
+        <button
+          className={"vbtn" + (showDims ? " on" : "")}
+          onClick={() => setShowDims((v) => !v)}
+          title="Boîte englobante + dimensions"
+          aria-pressed={showDims}
+        >
+          <Ruler size={14} /> Cotes
+        </button>
         <button className="vbtn" onClick={resetCamera} title="Recentrer">
           <RotateCcw size={14} /> Recadrer
         </button>
+        <button className="vbtn" onClick={capture} title="Capture PNG du rendu">
+          <Camera size={14} /> Capture
+        </button>
+        <label
+          className="vbtn"
+          title="Éclairage"
+          style={{ display: "flex", alignItems: "center", gap: 6, cursor: "default" }}
+        >
+          <Sun size={14} />
+          <select
+            value={preset}
+            onChange={(e) => setPreset(e.target.value as PresetKey)}
+            title="Preset d'éclairage"
+            style={{ background: "transparent", color: "inherit", border: "none", cursor: "pointer", outline: "none" }}
+          >
+            {Object.entries(LIGHT_PRESETS).map(([key, v]) => (
+              <option key={key} value={key} style={{ color: "#000" }}>
+                {v.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <label
           className="vbtn vslider"
           title={`Luminosité ×${brightness.toFixed(2)}`}
@@ -221,20 +318,29 @@ export function Viewer3D({
         dpr={[1, 2]}
         camera={{ position: [2.4, 1.8, 2.4], fov: 45, near: 0.01, far: 100 }}
         gl={{ antialias: true, preserveDrawingBuffer: true }}
+        onCreated={({ gl }) => {
+          glRef.current = gl;
+        }}
       >
-        <color attach="background" args={["#171411"]} />
+        <color attach="background" args={[p.bg]} />
         <ExposureControl value={brightness} />
         {/* Local lights only — no <Environment preset> (it fetches a remote HDR,
-            which stalls offline / in the packaged app). */}
-        <ambientLight intensity={0.45 * brightness} />
-        <hemisphereLight intensity={0.6 * brightness} groundColor="#0f0c09" />
+            which stalls offline / in the packaged app). Driven by the preset. */}
+        <ambientLight intensity={(unlit ? 0.05 : p.ambient) * brightness} />
+        <hemisphereLight
+          intensity={(unlit ? 0.05 : p.hemi) * brightness}
+          groundColor="#0f0c09"
+        />
         <directionalLight
           position={[5, 8, 5]}
-          intensity={1.1 * brightness}
+          intensity={(unlit ? 0 : p.key) * brightness}
           castShadow
           shadow-mapSize={[1024, 1024]}
         />
-        <directionalLight position={[-5, 3, -4]} intensity={0.35 * brightness} />
+        <directionalLight
+          position={[-5, 3, -4]}
+          intensity={(unlit ? 0 : p.fill) * brightness}
+        />
 
         <Suspense fallback={<CanvasLoader />}>
           {src ? (
@@ -252,6 +358,8 @@ export function Viewer3D({
                 key={src}
                 url={src}
                 wireframe={wireframe}
+                unlit={unlit}
+                showBox={showDims}
                 onStats={setStats}
               />
             </ModelErrorBoundary>
@@ -299,6 +407,15 @@ export function Viewer3D({
           <span>{stats.faces.toLocaleString("fr-FR")} faces</span>
           <span className="sep">·</span>
           <span>{stats.vertices.toLocaleString("fr-FR")} sommets</span>
+          {showDims && (
+            <>
+              <span className="sep">·</span>
+              <span>
+                {stats.size.x.toFixed(2)} × {stats.size.y.toFixed(2)} ×{" "}
+                {stats.size.z.toFixed(2)}
+              </span>
+            </>
+          )}
         </div>
       )}
     </div>

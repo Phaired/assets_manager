@@ -11,6 +11,8 @@ mod events;
 mod installer;
 mod jobs;
 mod openai;
+mod openai_admin;
+mod openai_text;
 mod store;
 mod supervisor;
 mod types;
@@ -143,16 +145,26 @@ pub fn run() {
             commands::create_project,
             commands::get_project,
             commands::set_project_style,
+            commands::set_project_dna,
             commands::create_asset,
             commands::update_asset,
+            commands::rename_asset,
+            commands::set_asset_tags,
+            commands::set_asset_seed,
+            commands::set_asset_prompt,
+            commands::duplicate_asset,
             commands::delete_asset,
             commands::set_asset_gen3d,
             commands::upload_source,
             commands::reset_asset,
             commands::edit_image,
             commands::generate,
+            commands::suggest_prompts,
+            commands::ideate_pack,
+            commands::save_render,
             commands::get_config,
             commands::update_config,
+            commands::openai_costs,
             commands::server_status,
             commands::server_start,
             commands::server_stop,
@@ -167,6 +179,7 @@ pub fn run() {
             commands::delete_voice,
             commands::list_audio,
             commands::create_audio_item,
+            commands::set_audio_item_asset,
             commands::generate_audio_item,
             commands::delete_audio_item,
             commands::project_file_src,

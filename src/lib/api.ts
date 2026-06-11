@@ -6,20 +6,25 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
   Asset,
+  AssetKind,
   AudioBundle,
   AudioItem,
   AudioKind,
   Backend,
   ConfigPatch,
   ConfigPublic,
+  CostsSummary,
   Gen3d,
   InstallProgress,
   JobCurrent,
   JobSnapshot,
+  PackAssetIdea,
   Project,
   ProjectBundle,
+  ProjectDna,
   ServerStatus,
   StageKey,
+  SuggestTarget,
   Voice,
   VoicePreview,
 } from "./types";
@@ -42,12 +47,21 @@ export function setProjectStyle(project: string, style: string): Promise<void> {
   return invoke<void>("set_project_style", { project, style });
 }
 
+/** Persist the project DNA (identity sheet injected into every pipeline). */
+export function setProjectDna(
+  project: string,
+  dna: ProjectDna,
+): Promise<void> {
+  return invoke<void>("set_project_dna", { project, dna });
+}
+
 export function createAsset(args: {
   project: string;
   name: string;
   description: string;
   tags: string[];
   backend: Backend;
+  kind?: AssetKind;
 }): Promise<Asset> {
   return invoke<Asset>("create_asset", args);
 }
@@ -61,8 +75,57 @@ export function updateAsset(
   return invoke<void>("update_asset", { project, assetId, backend });
 }
 
+/** Rename an asset's display name (id/slug and disk paths stay unchanged). */
+export function renameAsset(
+  project: string,
+  assetId: string,
+  name: string,
+): Promise<void> {
+  return invoke<void>("rename_asset", { project, assetId, name });
+}
+
+/** Replace an asset's tags. */
+export function setAssetTags(
+  project: string,
+  assetId: string,
+  tags: string[],
+): Promise<void> {
+  return invoke<void>("set_asset_tags", { project, assetId, tags });
+}
+
+/** Set (or clear, when `seed` is null) the per-asset 3D seed override. */
+export function setAssetSeed(
+  project: string,
+  assetId: string,
+  seed: number | null,
+): Promise<void> {
+  return invoke<void>("set_asset_seed", { project, assetId, seed });
+}
+
+/** Set (or clear, when empty) the per-asset multiview prompt override. */
+export function setAssetPrompt(
+  project: string,
+  assetId: string,
+  prompt: string,
+): Promise<void> {
+  return invoke<void>("set_asset_prompt", { project, assetId, prompt });
+}
+
+/** Duplicate an asset's configuration (no generated files copied). */
+export function duplicateAsset(
+  project: string,
+  assetId: string,
+): Promise<Asset> {
+  return invoke<Asset>("duplicate_asset", { project, assetId });
+}
+
 export function deleteAsset(project: string, assetId: string): Promise<void> {
   return invoke<void>("delete_asset", { project, assetId });
+}
+
+/** Write raw bytes (e.g. a viewer screenshot) to a user-chosen absolute path. */
+export function saveRender(dest: string, bytes: number[]): Promise<void> {
+  return invoke<void>("save_render", { dest, bytes });
 }
 
 export function uploadSource(
@@ -114,8 +177,30 @@ export function generate(
   return invoke<JobCurrent | null>("generate", { project, assetId, stages });
 }
 
+/** Creative director: 3 suggested prompts for one modality, from the DNA. */
+export function suggestPrompts(
+  project: string,
+  assetId: string | null,
+  target: SuggestTarget,
+): Promise<string[]> {
+  return invoke<string[]>("suggest_prompts", { project, assetId, target });
+}
+
+/** Creative director: ideate a whole asset pack from the DNA + a brief. */
+export function ideatePack(
+  project: string,
+  brief: string,
+): Promise<PackAssetIdea[]> {
+  return invoke<PackAssetIdea[]>("ideate_pack", { project, brief });
+}
+
 export function getConfig(): Promise<ConfigPublic> {
   return invoke<ConfigPublic>("get_config");
+}
+
+/** Real billed costs of the OpenAI org over the last `days` days (admin key). */
+export function openaiCosts(days?: number): Promise<CostsSummary> {
+  return invoke<CostsSummary>("openai_costs", { days });
 }
 
 export function updateConfig(patch: ConfigPatch): Promise<ConfigPublic> {
@@ -220,9 +305,19 @@ export function createAudioItem(args: {
   name: string;
   text: string;
   voiceId?: string | null;
+  assetId?: string | null;
   params?: Record<string, unknown>;
 }): Promise<AudioItem> {
   return invoke<AudioItem>("create_audio_item", args);
+}
+
+/** Link (or unlink, when `assetId` is null) an audio item to an asset. */
+export function setAudioItemAsset(
+  project: string,
+  itemId: string,
+  assetId: string | null,
+): Promise<void> {
+  return invoke<void>("set_audio_item_asset", { project, itemId, assetId });
 }
 
 export function generateAudioItem(

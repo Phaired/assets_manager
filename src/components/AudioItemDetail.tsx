@@ -5,6 +5,8 @@ import {
   Trash2,
   Download,
   AlertTriangle,
+  Box,
+  X,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
@@ -21,7 +23,11 @@ import {
   useVoices,
   useGenerateAudioItem,
   useDeleteAudioItem,
+  useProject,
+  useSetAudioItemAsset,
 } from "../lib/queries";
+import { useNavigate } from "@tanstack/react-router";
+import { useAppState } from "../lib/appState";
 import { projectFileUrl, saveProjectFile } from "../lib/api";
 import { AudioPlayer } from "./AudioPlayer";
 import { Badge } from "@/components/ui/badge";
@@ -45,8 +51,16 @@ export function AudioItemDetail({
 }) {
   const generate = useGenerateAudioItem(project);
   const del = useDeleteAudioItem(project);
+  const setItemAsset = useSetAudioItemAsset(project);
   const voicesQ = useVoices();
+  const projectQ = useProject(project);
+  const navigate = useNavigate();
+  const { setAssetId } = useAppState();
   const [src, setSrc] = useState<string | null>(null);
+
+  const linkedAsset = item.assetId
+    ? projectQ.data?.project.assets.find((a) => a.id === item.assetId) ?? null
+    : null;
 
   const voiceName =
     item.kind === "voice"
@@ -105,6 +119,29 @@ export function AudioItemDetail({
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Badge variant="secondary">{AUDIO_KIND_LABELS[item.kind]}</Badge>
               {voiceName && <span>voix : {voiceName}</span>}
+              {linkedAsset && (
+                <Badge
+                  variant="outline"
+                  className="cursor-pointer gap-1 hover:text-foreground"
+                  title="Ouvrir l'asset lié"
+                  onClick={() => {
+                    setAssetId(linkedAsset.id);
+                    void navigate({ to: "/" });
+                  }}
+                >
+                  <Box size={11} /> {linkedAsset.name}
+                  <button
+                    title="Délier de l'asset"
+                    className="text-muted-foreground hover:text-destructive"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setItemAsset.mutate({ itemId: item.id, assetId: null });
+                    }}
+                  >
+                    <X size={11} />
+                  </button>
+                </Badge>
+              )}
               <span className="flex items-center gap-1">
                 <span
                   className={cn(

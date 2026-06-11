@@ -15,6 +15,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { ConfigPatch, Gen3d } from "../lib/types";
 import { MULTIVIEW_TEMPLATES } from "../lib/constants";
 import { HunyuanInstaller } from "./HunyuanInstaller";
+import { OpenaiCostsPanel } from "./OpenaiCostsPanel";
 import {
   useConfig,
   useServer,
@@ -78,6 +79,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const stopServer = useServerStop();
 
   const [key, setKey] = useState("");
+  const [adminKey, setAdminKey] = useState("");
   const [elevenKey, setElevenKey] = useState("");
   const [model, setModel] = useState("");
   const [quality, setQuality] = useState("low");
@@ -86,6 +88,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [timeout, setTimeoutVal] = useState("");
   const [backend, setBackend] = useState<"v21" | "mv2">("v21");
   const [promptTemplate, setPromptTemplate] = useState("");
+  const [textureTemplate, setTextureTemplate] = useState("");
   const [gen, setGen] = useState<Gen3d | null>(null);
   const [hun, setHun] = useState<HunyuanForm | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -97,6 +100,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     const c = configQ.data;
     if (!c) return;
     setKey("");
+    setAdminKey("");
     setElevenKey("");
     setModel(c.openaiModel);
     setQuality(c.openaiQuality);
@@ -105,6 +109,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     setTimeoutVal(String(c.openaiTimeout));
     setBackend(c.defaultBackend);
     setPromptTemplate(c.multiviewPromptTemplate);
+    setTextureTemplate(c.texturePromptTemplate);
     setGen(c.gen3d);
     setHun({
       v21: {
@@ -160,9 +165,11 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       openaiTimeout: parseInt(timeout, 10),
       defaultBackend: backend,
       multiviewPromptTemplate: promptTemplate,
+      texturePromptTemplate: textureTemplate,
       gen3d,
     };
     if (key.trim()) patch.openaiApiKey = key.trim();
+    if (adminKey.trim()) patch.openaiAdminApiKey = adminKey.trim();
     if (elevenKey.trim()) patch.elevenlabsApiKey = elevenKey.trim();
     if (hun) {
       const entry = (e: HunEntryForm) => ({
@@ -224,6 +231,24 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   }
                   onChange={(e) => setKey(e.target.value)}
                 />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="settings-admin-key">
+                  Clé admin OpenAI (suivi des dépenses, optionnel)
+                </Label>
+                <Input
+                  id="settings-admin-key"
+                  type="password"
+                  value={adminKey}
+                  placeholder={
+                    c.openaiAdminKeySet
+                      ? "déjà configurée — laisser vide pour garder"
+                      : "sk-admin-… (Organization → Admin keys)"
+                  }
+                  onChange={(e) => setAdminKey(e.target.value)}
+                />
+                <OpenaiCostsPanel adminKeySet={c.openaiAdminKeySet} />
               </div>
 
               <div className="flex flex-col gap-1.5">
@@ -359,6 +384,26 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   <Package size={13} /> Objet / prop
                 </Button>
               </div>
+
+              <Separator />
+
+              <h3 className="text-sm font-semibold">
+                Prompt de base (texture seamless)
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Gabarit envoyé à OpenAI pour les assets de type « texture »
+                (tileable). Mêmes placeholders :{" "}
+                <code className="font-mono">{"{subject}"}</code> et{" "}
+                <code className="font-mono">{"{style}"}</code>. Laisser vide
+                pour revenir au gabarit par défaut.
+              </p>
+              <Textarea
+                rows={8}
+                className="font-mono text-xs leading-relaxed"
+                value={textureTemplate}
+                onChange={(e) => setTextureTemplate(e.target.value)}
+                aria-label="Gabarit du prompt texture"
+              />
 
               <Separator />
 

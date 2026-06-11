@@ -30,13 +30,15 @@ function ViewerFallback({ height }: { height: number }) {
 export function LazyViewer3D({
   src,
   height = 420,
+  name,
 }: {
   src: string | null;
   height?: number;
+  name?: string;
 }) {
   return (
     <Suspense fallback={<ViewerFallback height={height} />}>
-      <Viewer3D src={src} height={height} />
+      <Viewer3D src={src} height={height} name={name} />
     </Suspense>
   );
 }

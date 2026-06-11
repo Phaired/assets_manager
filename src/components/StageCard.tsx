@@ -43,6 +43,11 @@ export function StageCard({
 
   const el = elapsed(state?.updatedAt);
 
+  // OpenAI cost of the last run (real when computed from the API usage block).
+  const cost =
+    typeof state?.meta?.cost === "number" ? (state.meta.cost as number) : null;
+  const costReal = state?.meta?.cost_source === "api";
+
   // Left accent bar color reflects status.
   const accentClass =
     status === "done"
@@ -70,6 +75,7 @@ export function StageCard({
         <>
           <Loader2 size={13} className="animate-spin" /> en cours
           {el ? ` · ${el}` : ""}
+          <span className="text-muted-foreground">· {def.eta}</span>
         </>
       );
       break;
@@ -84,6 +90,18 @@ export function StageCard({
       statusNode = (
         <>
           <Check size={13} /> terminé
+          {cost !== null && (
+            <span
+              className="text-muted-foreground"
+              title={
+                costReal
+                  ? "Coût réel calculé depuis les tokens renvoyés par l'API"
+                  : "Coût estimé (forfait) — modèle absent de la table de prix"
+              }
+            >
+              · ${cost.toFixed(4)} {costReal ? "" : "(est.)"}
+            </span>
+          )}
         </>
       );
       break;

@@ -2,19 +2,27 @@
 // camelCase over the Tauri bridge.
 
 export type Backend = "auto" | "v21" | "mv2";
-export type StageKey = "multiview" | "model3d" | "export";
+export type StageKey = "multiview" | "model3d" | "export" | "texture";
 export type StageStatus = "pending" | "queued" | "running" | "done" | "error";
+/** "model" = image → multivue → 3D ; "texture" = image seamless tileable. */
+export type AssetKind = "model" | "texture";
 
 export interface Asset {
   id: string;
   name: string;
   description: string;
   tags: string[];
+  /** Defaults to "model" on legacy assets. */
+  kind: AssetKind;
   backend: Backend;
   source: "openai" | "manual";
   createdAt: string; // disk: created_at
   /** Per-asset 3D generation override (partial). Absent → uses global defaults. */
   gen3d?: Partial<Gen3d>;
+  /** Per-asset 3D seed override. Absent → derived from the asset id. */
+  seed?: number;
+  /** Per-asset multiview prompt override. Absent → uses the global template. */
+  promptOverride?: string;
 }
 
 export interface StageState {
@@ -24,18 +32,39 @@ export interface StageState {
   meta: Record<string, unknown>;
 }
 
+/** Project identity sheet ("DNA") injected into every generation pipeline. */
+export interface ProjectDna {
+  /** What the game / experience is about (used by the LLM director). */
+  gameDescription: string;
+  /** Visual style (e.g. "low-poly, couleurs plates"). */
+  artStyle: string;
+  /** Color palette. */
+  palette: string;
+  /** Visual mood / ambiance. */
+  ambiance: string;
+  /** Audio tone. */
+  audioTone: string;
+  /** Instrumentation. */
+  audioInstrumentation: string;
+  /** Audio mood. */
+  audioMood: string;
+}
+
 export interface Project {
   name: string;
   createdAt: string; // disk: created_at
-  /** Free-text style applied to every asset's image prompt. */
+  /** Free-text style applied to every asset's image prompt. Legacy fallback /
+   *  mirror of `dna.artStyle`. */
   style: string;
+  /** Rich project identity (absent on legacy projects). */
+  dna?: ProjectDna;
   assets: Asset[];
 }
 
 export interface ProjectState {
   version: number;
   estimatedSpendUsd: number; // disk: estimated_spend_usd
-  assets: Record<string, Record<StageKey, StageState>>;
+  assets: Record<string, Partial<Record<StageKey, StageState>>>;
 }
 
 export interface JobCurrent {
@@ -132,12 +161,16 @@ export interface ConfigPublic {
   openaiModel: string;
   openaiQuality: string;
   openaiTimeout: number;
+  openaiTextModel: string;
   estimatedCostPerImage: number;
+  estimatedCostPerText: number;
   budgetUsd: number;
   defaultBackend: "v21" | "mv2";
   workspaceDir: string;
   multiviewPromptTemplate: string;
+  texturePromptTemplate: string;
   openaiKeySet: boolean;
+  openaiAdminKeySet: boolean;
   elevenlabsKeySet: boolean;
   audio: AudioConfig;
   gen3d: Gen3d;
@@ -149,14 +182,18 @@ export interface ConfigPublic {
 
 export interface ConfigPatch {
   openaiApiKey?: string;
+  openaiAdminApiKey?: string;
   openaiModel?: string;
   openaiQuality?: string;
   openaiTimeout?: number;
+  openaiTextModel?: string;
   estimatedCostPerImage?: number;
+  estimatedCostPerText?: number;
   budgetUsd?: number;
   defaultBackend?: "v21" | "mv2";
   workspaceDir?: string;
   multiviewPromptTemplate?: string;
+  texturePromptTemplate?: string;
   elevenlabsApiKey?: string;
   audio?: Partial<AudioConfig>;
   gen3d?: Partial<Gen3d>;
@@ -164,6 +201,41 @@ export interface ConfigPatch {
     v21?: HunyuanEntryPatch;
     mv2?: HunyuanEntryPatch;
   };
+}
+
+// --- OpenAI org costs (admin key) ------------------------------------------
+
+/** One daily billed-cost bucket (Unix seconds, USD). */
+export interface CostDay {
+  startTime: number;
+  endTime: number;
+  amountUsd: number;
+}
+
+/** Real billed costs of the whole OpenAI organization. */
+export interface CostsSummary {
+  totalUsd: number;
+  days: CostDay[];
+}
+
+// --- Creative director (OpenAI text) --------------------------------------
+
+/** Modalities the director can write prompts for. */
+export type SuggestTarget = "multiview" | "texture" | "sfx" | "music";
+
+/** Suggested sound of a pack idea. */
+export interface PackSoundIdea {
+  name: string;
+  prompt: string;
+}
+
+/** One asset proposed by the pack ideation. */
+export interface PackAssetIdea {
+  name: string;
+  description: string;
+  tags: string[];
+  kind: AssetKind;
+  sounds: PackSoundIdea[];
 }
 
 // --- Audio domain (ElevenLabs) ------------------------------------------
@@ -193,6 +265,8 @@ export interface AudioItem {
   name: string;
   text: string;
   voiceId?: string;
+  /** Id of the 3D/texture asset this item is linked to (absent when standalone). */
+  assetId?: string;
   params: Record<string, unknown>;
   status: AudioStatus;
   error: string | null;

@@ -18,7 +18,8 @@ use crate::store::Store;
 use crate::supervisor::Supervisor;
 use crate::types::{
     Asset, AudioBundle, AudioItem, ConfigPatch, ConfigPublic, Gen3dPatch, InstallProgress,
-    JobCurrent, Project, ProjectBundle, ProjectState, ServerStatus, Voice, VoicePreview,
+    JobCurrent, Project, ProjectBundle, ProjectDna, ProjectState, ServerStatus, Voice,
+    VoicePreview,
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -69,6 +70,19 @@ pub fn set_project_style(
     Ok(())
 }
 
+/// Persist the project's DNA (identity sheet injected into every pipeline).
+#[tauri::command]
+pub fn set_project_dna(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    dna: ProjectDna,
+) -> CmdResult<()> {
+    store.set_project_dna(&project, &dna)?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
+}
+
 // --- assets -------------------------------------------------------------
 
 #[tauri::command]
@@ -80,8 +94,13 @@ pub fn create_asset(
     description: String,
     tags: Vec<String>,
     backend: String,
+    kind: Option<String>,
 ) -> CmdResult<Asset> {
-    let asset_v = store.add_asset(&project, &name, &description, tags, &backend)?;
+    let kind = kind.unwrap_or_else(|| "model".to_string());
+    if kind != "model" && kind != "texture" {
+        return Err(format!("type d'asset invalide: {kind}"));
+    }
+    let asset_v = store.add_asset(&project, &name, &description, tags, &backend, &kind)?;
     events::emit_project_changed(&app, &project);
     Ok(Asset::from_disk(&asset_v))
 }
@@ -102,6 +121,83 @@ pub fn update_asset(
     store.set_asset_backend(&project, &asset_id, &backend)?;
     events::emit_project_changed(&app, &project);
     Ok(())
+}
+
+/// Rename an asset's display name (the id/slug and disk paths are unchanged).
+#[tauri::command]
+pub fn rename_asset(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    name: String,
+) -> CmdResult<()> {
+    if name.trim().is_empty() {
+        return Err("le nom est vide".into());
+    }
+    store.set_asset_name(&project, &asset_id, name.trim())?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
+}
+
+/// Replace an asset's tags.
+#[tauri::command]
+pub fn set_asset_tags(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    tags: Vec<String>,
+) -> CmdResult<()> {
+    let tags: Vec<String> = tags
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    store.set_asset_tags(&project, &asset_id, tags)?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
+}
+
+/// Set (or clear, when `seed` is null) the per-asset 3D seed override.
+#[tauri::command]
+pub fn set_asset_seed(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    seed: Option<i64>,
+) -> CmdResult<()> {
+    store.set_asset_seed(&project, &asset_id, seed)?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
+}
+
+/// Set (or clear, when empty) the per-asset multiview prompt override.
+#[tauri::command]
+pub fn set_asset_prompt(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    prompt: String,
+) -> CmdResult<()> {
+    store.set_asset_prompt(&project, &asset_id, &prompt)?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
+}
+
+/// Duplicate an asset's configuration into a new asset (no generated files copied).
+#[tauri::command]
+pub fn duplicate_asset(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+) -> CmdResult<Asset> {
+    let new = store.duplicate_asset(&project, &asset_id)?;
+    events::emit_project_changed(&app, &project);
+    Ok(Asset::from_disk(&new))
 }
 
 #[tauri::command]
@@ -264,11 +360,19 @@ pub fn edit_image(
         .unwrap_or("medium");
     let timeout = cfg.get("openai_timeout").and_then(|x| x.as_i64()).unwrap_or(300);
 
+    // Keep edits coherent with the project DNA / style.
+    let style_block = store.project_style_block(&project).unwrap_or_default();
+    let full_prompt = if style_block.is_empty() {
+        prompt.trim().to_string()
+    } else {
+        format!("{}\nStyle: {}", prompt.trim(), style_block)
+    };
+
     // Pure-Rust OpenAI edit call (the Python worker is not involved).
     let result = crate::openai::edit_image(
         &api_key,
         &base,
-        prompt.trim(),
+        &full_prompt,
         model,
         "", // size omitted for edits (API matches the input image; "auto" is invalid here)
         quality,
@@ -280,7 +384,7 @@ pub fn edit_image(
     if let Some(p) = &mask_path {
         let _ = std::fs::remove_file(p);
     }
-    let edited = result?;
+    let (edited, usage) = result?;
 
     // Overwrite source.png with the edited image.
     if let Some(parent) = source.parent() {
@@ -289,8 +393,13 @@ pub fn edit_image(
     std::fs::write(&source, &edited)
         .map_err(|e| AppError::msg(format!("écriture de l'image éditée: {e}")))?;
 
-    // Account spend, flip to a manual source, invalidate downstream stages.
-    let _ = store.add_spend(&project, est_cost)?;
+    // Account the REAL spend from the API usage block when the model is priced
+    // (fallback: flat estimate), flip to a manual source, invalidate downstream.
+    let cost = usage
+        .as_ref()
+        .and_then(|u| crate::config::image_cost_from_usage(&cfg, model, u))
+        .unwrap_or(est_cost);
+    let _ = store.add_spend(&project, cost)?;
     store.set_asset_source(&project, &asset_id, "manual")?;
     store.update_stage(&project, &asset_id, "model3d", "pending", None, None)?;
     store.update_stage(&project, &asset_id, "export", "pending", None, None)?;
@@ -299,6 +408,252 @@ pub fn edit_image(
     Ok(UploadResult {
         source: "manual".to_string(),
     })
+}
+
+// --- creative director (OpenAI text) --------------------------------------
+
+/// Suggested sound for a pack asset (LLM ideation output).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackSoundIdea {
+    pub name: String,
+    pub prompt: String,
+}
+
+/// One asset proposed by the pack ideation (LLM output, user-checkable).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackAssetIdea {
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    /// "model" | "texture"
+    pub kind: String,
+    pub sounds: Vec<PackSoundIdea>,
+}
+
+/// Budget gate + system prompt shared by the two director commands. Returns
+/// (api_key, model, est_cost, system_prompt).
+fn director_context(
+    cfg: &serde_json::Value,
+    store: &Store,
+    project: &str,
+) -> Result<(String, String, f64, String), String> {
+    let api_key = crate::config::openai_key(cfg);
+    if api_key.is_empty() {
+        return Err("OPENAI_API_KEY absent (Réglages ou .env)".into());
+    }
+    let model = cfg
+        .get("openai_text_model")
+        .and_then(|x| x.as_str())
+        .unwrap_or("gpt-4.1-mini")
+        .to_string();
+    let est_cost = cfg
+        .get("estimated_cost_per_text")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.005);
+    let budget = cfg.get("budget_usd").and_then(|x| x.as_f64()).unwrap_or(5.0);
+    let state = store.load_state(project).map_err(String::from)?;
+    let spend = state
+        .get("estimated_spend_usd")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
+    if spend + est_cost > budget + 1e-9 {
+        return Err(format!(
+            "budget atteint: projeté ${:.3} > ${:.2}",
+            spend + est_cost,
+            budget
+        ));
+    }
+
+    let dna = store.project_dna(project).map_err(String::from)?;
+    let style_block = store.project_style_block(project).unwrap_or_default();
+    let audio_ctx = store.project_audio_context(project).unwrap_or_default();
+    let mut system = String::from(
+        "You are the creative director of a Roblox asset-generation studio. \
+         You write generation prompts that keep every asset (images, 3D models, \
+         textures, sounds, music) coherent with the project identity below.\n",
+    );
+    if let Some(d) = &dna {
+        if !d.game_description.trim().is_empty() {
+            system.push_str(&format!("GAME: {}\n", d.game_description.trim()));
+        }
+    }
+    if !style_block.is_empty() {
+        system.push_str(&format!("VISUAL STYLE: {style_block}\n"));
+    }
+    if !audio_ctx.is_empty() {
+        system.push_str(&format!("AUDIO STYLE: {audio_ctx}\n"));
+    }
+    Ok((api_key, model, est_cost, system))
+}
+
+/// Suggest 3 optimized generation prompts for one modality, coherent with the
+/// project DNA (and the asset's name/description when provided).
+#[tauri::command]
+pub fn suggest_prompts(
+    app: tauri::AppHandle,
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: Option<String>,
+    target: String,
+) -> CmdResult<Vec<String>> {
+    let target_desc = match target.as_str() {
+        "multiview" => {
+            "the SUBJECT line of a 2x2 orthographic multi-view character/object \
+             sheet for image-to-3D reconstruction. Return concise English noun \
+             phrases describing the subject (creature/object + colors/materials/\
+             accessories), WITHOUT style words like low-poly (the template adds them)"
+        }
+        "texture" => {
+            "the SUBJECT of a seamless tileable game texture. Return concise \
+             English noun phrases (material, pattern, colors)"
+        }
+        "sfx" => {
+            "an ElevenLabs sound-effect generation prompt. Return short English \
+             descriptions of the sound (source, character, duration feel)"
+        }
+        "music" => {
+            "an ElevenLabs music generation prompt. Return short English \
+             descriptions (genre, instrumentation, tempo, mood)"
+        }
+        other => return Err(format!("cible invalide: {other}")),
+    };
+
+    let cfg = config.load();
+    let (api_key, model, est_cost, system) = director_context(&cfg, &store, &project)?;
+    let timeout = cfg.get("openai_timeout").and_then(|x| x.as_i64()).unwrap_or(300);
+
+    let mut user = format!("Write 3 alternative prompts for {target_desc}.");
+    if let Some(aid) = asset_id.as_deref().filter(|s| !s.is_empty()) {
+        let asset = store.get_asset(&project, aid)?;
+        let name = asset.get("name").and_then(|x| x.as_str()).unwrap_or("");
+        let description = asset.get("description").and_then(|x| x.as_str()).unwrap_or("");
+        user.push_str(&format!("\nASSET: {name}"));
+        if !description.trim().is_empty() {
+            user.push_str(&format!(" — {description}"));
+        }
+    }
+
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "prompts": {
+                "type": "array",
+                "items": {"type": "string"}
+            }
+        },
+        "required": ["prompts"],
+        "additionalProperties": false
+    });
+    let (out, usage) = crate::openai_text::chat_json(
+        &api_key, &model, &system, &user, "prompt_suggestions", &schema, timeout,
+    )?;
+    let prompts: Vec<String> = out
+        .get("prompts")
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .filter(|s| !s.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if prompts.is_empty() {
+        return Err("le modèle n'a renvoyé aucune suggestion".into());
+    }
+    let cost = usage
+        .as_ref()
+        .and_then(|u| crate::config::text_cost_from_usage(&cfg, &model, u))
+        .unwrap_or(est_cost);
+    let _ = store.add_spend(&project, cost)?;
+    events::emit_project_changed(&app, &project);
+    Ok(prompts)
+}
+
+/// Ideate a whole asset pack from the project DNA + a free-text brief. The
+/// frontend lets the user check ideas and creates assets/sounds itself.
+#[tauri::command]
+pub fn ideate_pack(
+    app: tauri::AppHandle,
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    brief: String,
+) -> CmdResult<Vec<PackAssetIdea>> {
+    if brief.trim().is_empty() {
+        return Err("la consigne est vide".into());
+    }
+    let cfg = config.load();
+    let (api_key, model, est_cost, system) = director_context(&cfg, &store, &project)?;
+    let timeout = cfg.get("openai_timeout").and_then(|x| x.as_i64()).unwrap_or(300);
+
+    let user = format!(
+        "Propose a coherent pack of game assets for this brief: \"{}\".\n\
+         For each asset return:\n\
+         - name: short French display name\n\
+         - description: concise English noun phrase describing the subject \
+           (creature/object/material + colors/materials/accessories), WITHOUT \
+           style words like low-poly (the generation template adds them)\n\
+         - tags: 1-3 short French tags\n\
+         - kind: \"model\" for a 3D model, \"texture\" for a seamless tileable texture\n\
+         - sounds: 0-2 suggested sound effects (name: short French name, prompt: \
+           short English SFX description)\n\
+         Follow any asset count requested in the brief (default ~8).",
+        brief.trim()
+    );
+
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "assets": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "kind": {"type": "string", "enum": ["model", "texture"]},
+                        "sounds": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "prompt": {"type": "string"}
+                                },
+                                "required": ["name", "prompt"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["name", "description", "tags", "kind", "sounds"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["assets"],
+        "additionalProperties": false
+    });
+    let (out, usage) = crate::openai_text::chat_json(
+        &api_key, &model, &system, &user, "pack_ideas", &schema, timeout,
+    )?;
+    let ideas: Vec<PackAssetIdea> = serde_json::from_value(
+        out.get("assets").cloned().unwrap_or(serde_json::json!([])),
+    )
+    .map_err(|e| format!("réponse du modèle invalide: {e}"))?;
+    if ideas.is_empty() {
+        return Err("le modèle n'a proposé aucun asset".into());
+    }
+    let cost = usage
+        .as_ref()
+        .and_then(|u| crate::config::text_cost_from_usage(&cfg, &model, u))
+        .unwrap_or(est_cost);
+    let _ = store.add_spend(&project, cost)?;
+    events::emit_project_changed(&app, &project);
+    Ok(ideas)
 }
 
 // --- generation ---------------------------------------------------------
@@ -323,8 +678,9 @@ pub fn generate(
 pub fn get_config(config: State<'_, Arc<Config>>) -> CmdResult<ConfigPublic> {
     let cfg = config.load();
     let key_set = !crate::config::openai_key(&cfg).is_empty();
+    let admin_set = !crate::config::openai_admin_key(&cfg).is_empty();
     let el_set = !crate::config::elevenlabs_key(&cfg).is_empty();
-    Ok(ConfigPublic::from_config(&cfg, key_set, el_set))
+    Ok(ConfigPublic::from_config(&cfg, key_set, admin_set, el_set))
 }
 
 #[tauri::command]
@@ -339,8 +695,32 @@ pub fn update_config(
     let merged = crate::config::deep_merge(&current, &over);
     let saved = config.save(&merged)?;
     let key_set = !crate::config::openai_key(&saved).is_empty();
+    let admin_set = !crate::config::openai_admin_key(&saved).is_empty();
     let el_set = !crate::config::elevenlabs_key(&saved).is_empty();
-    Ok(ConfigPublic::from_config(&saved, key_set, el_set))
+    Ok(ConfigPublic::from_config(&saved, key_set, admin_set, el_set))
+}
+
+/// Real billed costs of the OpenAI organization (admin key required), daily
+/// buckets over the last `days` days (default 30). Straight from OpenAI's
+/// books — covers EVERYTHING billed on the org, not just this app.
+#[tauri::command]
+pub fn openai_costs(
+    config: State<'_, Arc<Config>>,
+    days: Option<i64>,
+) -> CmdResult<crate::openai_admin::CostsSummary> {
+    let cfg = config.load();
+    let admin_key = crate::config::openai_admin_key(&cfg);
+    if admin_key.is_empty() {
+        return Err(
+            "clé admin OpenAI absente — crée une clé sk-admin… sur \
+             platform.openai.com (Organization → Admin keys) et renseigne-la \
+             dans les Réglages"
+                .into(),
+        );
+    }
+    let days = days.unwrap_or(30).clamp(1, 180);
+    let start = chrono::Utc::now().timestamp() - days * 86_400;
+    crate::openai_admin::costs(&admin_key, start, 60).map_err(Into::into)
 }
 
 // --- hunyuan supervisor -------------------------------------------------
@@ -445,6 +825,22 @@ pub fn save_asset_file(
     }
     std::fs::copy(&src, &dest)
         .map_err(|e| AppError::msg(format!("échec de la copie vers {}: {e}", dest.display())))?;
+    Ok(())
+}
+
+/// Write raw bytes (e.g. a viewer screenshot PNG) to a user-chosen absolute path.
+/// The destination comes from the native save dialog on the frontend.
+#[tauri::command]
+pub fn save_render(dest: String, bytes: Vec<u8>) -> CmdResult<()> {
+    if bytes.is_empty() {
+        return Err("capture vide".into());
+    }
+    let dest = std::path::PathBuf::from(&dest);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::from)?;
+    }
+    std::fs::write(&dest, &bytes)
+        .map_err(|e| AppError::msg(format!("échec de l'écriture vers {}: {e}", dest.display())))?;
     Ok(())
 }
 
@@ -554,6 +950,7 @@ pub fn create_audio_item(
     name: String,
     text: String,
     voice_id: Option<String>,
+    asset_id: Option<String>,
     params: Option<serde_json::Value>,
 ) -> CmdResult<AudioItem> {
     if kind != "voice" && kind != "sfx" && kind != "music" {
@@ -568,6 +965,11 @@ pub fn create_audio_item(
     if kind == "voice" && voice_id.as_deref().unwrap_or("").is_empty() {
         return Err("sélectionne une voix pour un clip de voix".into());
     }
+    // A linked asset must exist.
+    let asset_id = asset_id.filter(|s| !s.is_empty());
+    if let Some(aid) = &asset_id {
+        let _ = store.get_asset(&project, aid)?;
+    }
     let params = params.unwrap_or_else(|| serde_json::json!({}));
     let item = store.add_audio_item(
         &project,
@@ -575,10 +977,29 @@ pub fn create_audio_item(
         name.trim(),
         text.trim(),
         voice_id.as_deref().filter(|s| !s.is_empty()),
+        asset_id.as_deref(),
         params,
     )?;
     events::emit_project_changed(&app, &project);
     Ok(item)
+}
+
+/// Link (or unlink, when `asset_id` is null/empty) an audio item to an asset.
+#[tauri::command]
+pub fn set_audio_item_asset(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    item_id: String,
+    asset_id: Option<String>,
+) -> CmdResult<()> {
+    let asset_id = asset_id.filter(|s| !s.is_empty());
+    if let Some(aid) = &asset_id {
+        let _ = store.get_asset(&project, aid)?;
+    }
+    store.set_audio_item_asset(&project, &item_id, asset_id.as_deref())?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
 }
 
 #[tauri::command]

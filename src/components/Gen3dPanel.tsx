@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Sliders, Loader2, Check, RotateCcw, Info } from "lucide-react";
+import { Sliders, Loader2, Check, RotateCcw, Info, Dices } from "lucide-react";
+import { toast } from "sonner";
 
 import type { Asset, Backend, Gen3d } from "@/lib/types";
-import { useConfig, useSetAssetGen3d } from "@/lib/queries";
+import {
+  useConfig,
+  useGenerate,
+  useSetAssetGen3d,
+  useSetAssetSeed,
+} from "@/lib/queries";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -77,10 +83,43 @@ export function Gen3dPanel({
   const configQ = useConfig();
   const defaults = configQ.data?.gen3d;
   const save = useSetAssetGen3d(project);
+  const setSeed = useSetAssetSeed(project);
+  const generate = useGenerate(project);
 
   const [open, setOpen] = useState(false);
   const [values, setValues] = useState<Gen3d | null>(null);
   const [saved, setSaved] = useState(false);
+  const [seedDraft, setSeedDraft] = useState("");
+
+  // Sync the seed field with the asset's override.
+  useEffect(() => {
+    setSeedDraft(asset.seed != null ? String(asset.seed) : "");
+  }, [asset.id, asset.seed]);
+
+  function commitSeed(value: string) {
+    const trimmed = value.trim();
+    const seed = trimmed === "" ? null : Math.max(0, Math.floor(Number(trimmed)));
+    if (trimmed !== "" && Number.isNaN(seed)) return;
+    setSeed.mutate({ assetId: asset.id, seed });
+  }
+
+  // Set a fresh random seed (same 0..9,999,999 range as the id-derived seed) and
+  // re-run the 3D + export so the user gets a new variation from the same image.
+  function reroll() {
+    const seed = Math.floor(Math.random() * 10_000_000);
+    setSeedDraft(String(seed));
+    setSeed.mutate(
+      { assetId: asset.id, seed },
+      {
+        onSuccess: () => {
+          generate.mutate(
+            { assetId: asset.id, stages: ["model3d", "export"] },
+            { onSuccess: () => toast.success("Nouvelle variation lancée") },
+          );
+        },
+      },
+    );
+  }
 
   // (Re)initialise local state from defaults + the asset's existing override.
   useEffect(() => {
@@ -216,6 +255,50 @@ export function Gen3dPanel({
               />
               Texture
             </Label>
+          </div>
+
+          {/* Seed — controls 3D variation. Empty = derived from the asset id. */}
+          <div className="flex flex-col gap-1.5">
+            <Label className="flex items-center gap-1 text-xs text-muted-foreground">
+              Seed
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Info className="size-3 cursor-help opacity-60" />
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[240px]">
+                  Graine de génération 3D. Vide = dérivée de l'identifiant de
+                  l'asset. « Re-roll » tire une nouvelle graine et relance la 3D.
+                </TooltipContent>
+              </Tooltip>
+            </Label>
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={0}
+                placeholder="auto"
+                className="w-40"
+                value={seedDraft}
+                onChange={(e) => setSeedDraft(e.target.value)}
+                onBlur={(e) => commitSeed(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitSeed((e.target as HTMLInputElement).value);
+                }}
+              />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={reroll}
+                disabled={setSeed.isPending || generate.isPending}
+                title="Nouvelle graine aléatoire + relance la 3D"
+              >
+                {setSeed.isPending || generate.isPending ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Dices className="size-3.5" />
+                )}
+                Re-roll
+              </Button>
+            </div>
           </div>
 
           <div className="flex items-center gap-2">

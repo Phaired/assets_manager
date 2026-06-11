@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const STAGES: [&str; 3] = ["multiview", "model3d", "export"];
+/// Stages of a `kind == "texture"` asset (single OpenAI image, no 3D).
+pub const TEXTURE_STAGES: [&str; 1] = ["texture"];
 pub const VIEW_FILES: [&str; 4] = ["front.png", "back.png", "left.png", "right.png"];
 
 // --- Asset --------------------------------------------------------------
@@ -18,6 +20,9 @@ pub struct Asset {
     pub name: String,
     pub description: String,
     pub tags: Vec<String>,
+    /// "model" (image → multiview → 3D → export) or "texture" (single
+    /// seamless tileable image). Defaults to "model" on legacy assets.
+    pub kind: String,
     pub backend: String,
     pub source: String,
     pub created_at: String,
@@ -25,6 +30,12 @@ pub struct Asset {
     /// the asset uses the global defaults. Merged over config `gen3d` at run time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gen3d: Option<Value>,
+    /// Per-asset 3D seed override. Absent → derived from the asset id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// Per-asset multiview prompt override. Absent → uses the global template.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_override: Option<String>,
 }
 
 impl Asset {
@@ -43,6 +54,11 @@ impl Asset {
                         .collect()
                 })
                 .unwrap_or_default(),
+            kind: v
+                .get("kind")
+                .and_then(|x| x.as_str())
+                .unwrap_or("model")
+                .to_string(),
             backend: v
                 .get("backend")
                 .and_then(|x| x.as_str())
@@ -57,6 +73,12 @@ impl Asset {
             // On disk gen3d is stored snake_case; expose it to the bridge as the
             // camelCase the UI uses.
             gen3d: v.get("gen3d").map(gen3d_disk_to_camel),
+            seed: v.get("seed").and_then(|x| x.as_i64()),
+            prompt_override: v
+                .get("prompt_override")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
         }
     }
 }
@@ -95,14 +117,98 @@ impl StageState {
 
 // --- Project ------------------------------------------------------------
 
+/// Project identity sheet ("DNA") injected into every generation pipeline
+/// (image prompts, SFX/music context, texture prompts). Stored snake_case in
+/// project.json under "dna"; absent on legacy projects (style fallback applies).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDna {
+    /// What the game / experience is about (used by the LLM director).
+    pub game_description: String,
+    /// Visual style (e.g. "low-poly, flat colors").
+    pub art_style: String,
+    /// Color palette (e.g. "vives, saturées, pastel").
+    pub palette: String,
+    /// Visual mood / ambiance (e.g. "cartoon joyeux").
+    pub ambiance: String,
+    /// Audio tone (e.g. "léger, comique").
+    pub audio_tone: String,
+    /// Instrumentation (e.g. "8-bit, percussions douces").
+    pub audio_instrumentation: String,
+    /// Audio mood (e.g. "énergique, fun").
+    pub audio_mood: String,
+}
+
+impl ProjectDna {
+    pub fn from_disk(v: &Value) -> Self {
+        ProjectDna {
+            game_description: str_field(v, "game_description"),
+            art_style: str_field(v, "art_style"),
+            palette: str_field(v, "palette"),
+            ambiance: str_field(v, "ambiance"),
+            audio_tone: str_field(v, "audio_tone"),
+            audio_instrumentation: str_field(v, "audio_instrumentation"),
+            audio_mood: str_field(v, "audio_mood"),
+        }
+    }
+
+    /// Snake_case JSON for project.json.
+    pub fn to_disk(&self) -> Value {
+        serde_json::json!({
+            "game_description": self.game_description,
+            "art_style": self.art_style,
+            "palette": self.palette,
+            "ambiance": self.ambiance,
+            "audio_tone": self.audio_tone,
+            "audio_instrumentation": self.audio_instrumentation,
+            "audio_mood": self.audio_mood,
+        })
+    }
+
+    /// Composed visual style block injected into the `{style}` placeholder of
+    /// image prompt templates. Empty fields are omitted.
+    pub fn style_block(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.art_style.trim().is_empty() {
+            parts.push(format!("Art direction: {}.", self.art_style.trim()));
+        }
+        if !self.palette.trim().is_empty() {
+            parts.push(format!("Color palette: {}.", self.palette.trim()));
+        }
+        if !self.ambiance.trim().is_empty() {
+            parts.push(format!("Mood: {}.", self.ambiance.trim()));
+        }
+        parts.join(" ")
+    }
+
+    /// Composed audio context appended to SFX/music prompts. Empty fields omitted.
+    pub fn audio_context(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.audio_tone.trim().is_empty() {
+            parts.push(format!("Tone: {}.", self.audio_tone.trim()));
+        }
+        if !self.audio_instrumentation.trim().is_empty() {
+            parts.push(format!("Instrumentation: {}.", self.audio_instrumentation.trim()));
+        }
+        if !self.audio_mood.trim().is_empty() {
+            parts.push(format!("Mood: {}.", self.audio_mood.trim()));
+        }
+        parts.join(" ")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub name: String,
     pub created_at: String,
     /// Free-text style applied to every asset's image prompt (e.g. "low-poly,
-    /// flat colors"). Empty by default. Persisted in project.json.
+    /// flat colors"). Empty by default. Persisted in project.json. Kept as a
+    /// legacy fallback / mirror of `dna.art_style` for old builds.
     pub style: String,
+    /// Rich project identity (absent on legacy projects).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dna: Option<ProjectDna>,
     pub assets: Vec<Asset>,
 }
 
@@ -112,6 +218,10 @@ impl Project {
             name: str_field(v, "name"),
             created_at: str_field(v, "created_at"),
             style: str_field(v, "style"),
+            dna: v
+                .get("dna")
+                .filter(|d| d.is_object())
+                .map(ProjectDna::from_disk),
             assets: v
                 .get("assets")
                 .and_then(|a| a.as_array())
@@ -329,12 +439,16 @@ pub struct ConfigPublic {
     pub openai_model: String,
     pub openai_quality: String,
     pub openai_timeout: i64,
+    pub openai_text_model: String,
     pub estimated_cost_per_image: f64,
+    pub estimated_cost_per_text: f64,
     pub budget_usd: f64,
     pub default_backend: String,
     pub workspace_dir: String,
     pub multiview_prompt_template: String,
+    pub texture_prompt_template: String,
     pub openai_key_set: bool,
+    pub openai_admin_key_set: bool,
     pub elevenlabs_key_set: bool,
     pub audio: AudioConfigPublic,
     pub gen3d: Gen3d,
@@ -342,17 +456,31 @@ pub struct ConfigPublic {
 }
 
 impl ConfigPublic {
-    pub fn from_config(cfg: &Value, key_set: bool, elevenlabs_key_set: bool) -> Self {
+    pub fn from_config(
+        cfg: &Value,
+        key_set: bool,
+        admin_key_set: bool,
+        elevenlabs_key_set: bool,
+    ) -> Self {
         let gen3d_v = cfg.get("gen3d").cloned().unwrap_or(Value::Null);
         let hun = cfg.get("hunyuan").cloned().unwrap_or(Value::Null);
         ConfigPublic {
             openai_model: str_field(cfg, "openai_model"),
             openai_quality: str_field(cfg, "openai_quality"),
             openai_timeout: int_field(cfg, "openai_timeout", 300),
+            openai_text_model: cfg
+                .get("openai_text_model")
+                .and_then(|x| x.as_str())
+                .unwrap_or("gpt-4.1-mini")
+                .to_string(),
             estimated_cost_per_image: cfg
                 .get("estimated_cost_per_image")
                 .and_then(|x| x.as_f64())
                 .unwrap_or(0.063),
+            estimated_cost_per_text: cfg
+                .get("estimated_cost_per_text")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.005),
             budget_usd: cfg.get("budget_usd").and_then(|x| x.as_f64()).unwrap_or(5.0),
             default_backend: cfg
                 .get("default_backend")
@@ -361,7 +489,9 @@ impl ConfigPublic {
                 .to_string(),
             workspace_dir: str_field(cfg, "workspace_dir"),
             multiview_prompt_template: str_field(cfg, "multiview_prompt_template"),
+            texture_prompt_template: str_field(cfg, "texture_prompt_template"),
             openai_key_set: key_set,
+            openai_admin_key_set: admin_key_set,
             elevenlabs_key_set,
             audio: AudioConfigPublic::from_config(cfg),
             gen3d: Gen3d::from_config(&gen3d_v),
@@ -489,14 +619,18 @@ impl AudioPatch {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigPatch {
     pub openai_api_key: Option<String>,
+    pub openai_admin_api_key: Option<String>,
     pub openai_model: Option<String>,
     pub openai_quality: Option<String>,
     pub openai_timeout: Option<i64>,
+    pub openai_text_model: Option<String>,
     pub estimated_cost_per_image: Option<f64>,
+    pub estimated_cost_per_text: Option<f64>,
     pub budget_usd: Option<f64>,
     pub default_backend: Option<String>,
     pub workspace_dir: Option<String>,
     pub multiview_prompt_template: Option<String>,
+    pub texture_prompt_template: Option<String>,
     pub elevenlabs_api_key: Option<String>,
     pub audio: Option<AudioPatch>,
     pub gen3d: Option<Gen3dPatch>,
@@ -511,6 +645,9 @@ impl ConfigPatch {
         if let Some(v) = &self.openai_api_key {
             obj.insert("openai_api_key".into(), Value::String(v.clone()));
         }
+        if let Some(v) = &self.openai_admin_api_key {
+            obj.insert("openai_admin_api_key".into(), Value::String(v.clone()));
+        }
         if let Some(v) = &self.openai_model {
             obj.insert("openai_model".into(), Value::String(v.clone()));
         }
@@ -520,8 +657,14 @@ impl ConfigPatch {
         if let Some(v) = self.openai_timeout {
             obj.insert("openai_timeout".into(), Value::from(v));
         }
+        if let Some(v) = &self.openai_text_model {
+            obj.insert("openai_text_model".into(), Value::String(v.clone()));
+        }
         if let Some(v) = self.estimated_cost_per_image {
             obj.insert("estimated_cost_per_image".into(), Value::from(v));
+        }
+        if let Some(v) = self.estimated_cost_per_text {
+            obj.insert("estimated_cost_per_text".into(), Value::from(v));
         }
         if let Some(v) = self.budget_usd {
             obj.insert("budget_usd".into(), Value::from(v));
@@ -534,6 +677,9 @@ impl ConfigPatch {
         }
         if let Some(v) = &self.multiview_prompt_template {
             obj.insert("multiview_prompt_template".into(), Value::String(v.clone()));
+        }
+        if let Some(v) = &self.texture_prompt_template {
+            obj.insert("texture_prompt_template".into(), Value::String(v.clone()));
         }
         if let Some(v) = &self.elevenlabs_api_key {
             obj.insert("elevenlabs_api_key".into(), Value::String(v.clone()));
@@ -650,6 +796,9 @@ pub struct AudioItem {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice_id: Option<String>,
+    /// Id of the 3D/texture asset this item is linked to (absent when standalone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
     /// Kind-specific params (durationSeconds, promptInfluence, loop, musicLengthMs…).
     pub params: Value,
     pub status: String,
@@ -669,6 +818,11 @@ impl AudioItem {
             text: str_field(v, "text"),
             voice_id: v
                 .get("voice_id")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            asset_id: v
+                .get("asset_id")
                 .and_then(|x| x.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string()),

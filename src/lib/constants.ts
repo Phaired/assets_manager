@@ -1,9 +1,11 @@
-import type { AudioKind, AudioStatus, StageKey } from "./types";
+import type { AssetKind, AudioKind, AudioStatus, StageKey } from "./types";
 
 export interface StageDef {
   key: StageKey;
   label: string;
   hint: string;
+  /** Rough typical duration, shown as an ETA hint while the stage runs. */
+  eta: string;
 }
 
 export const STAGES: StageDef[] = [
@@ -11,20 +13,43 @@ export const STAGES: StageDef[] = [
     key: "multiview",
     label: "Multivue (OpenAI)",
     hint: "Génère la planche 4 vues via l'API OpenAI.",
+    eta: "~20–60 s",
   },
   {
     key: "model3d",
     label: "3D (Hunyuan)",
     hint: "Reconstruction + texture sur GPU — peut prendre 1 à 3 min.",
+    eta: "~1–3 min",
   },
   {
     key: "export",
     label: "Export OBJ",
     hint: "Convertit le .glb en .obj + .mtl + texture.",
+    eta: "~10–30 s",
   },
 ];
 
 export const ALL_STAGES: StageKey[] = ["multiview", "model3d", "export"];
+
+/** Unique stage of a `kind === "texture"` asset. */
+export const TEXTURE_STAGE: StageDef = {
+  key: "texture",
+  label: "Texture (OpenAI)",
+  hint: "Génère une texture seamless tileable via l'API OpenAI.",
+  eta: "~20–60 s",
+};
+
+export const TEXTURE_STAGES: StageDef[] = [TEXTURE_STAGE];
+
+/** Stage definitions of an asset, by kind. */
+export function stageDefsForKind(kind: AssetKind): StageDef[] {
+  return kind === "texture" ? TEXTURE_STAGES : STAGES;
+}
+
+/** Stage keys of an asset, by kind. */
+export function stagesForKind(kind: AssetKind): StageKey[] {
+  return kind === "texture" ? ["texture"] : ALL_STAGES;
+}
 
 export const VIEW_FILES = ["front", "back", "left", "right"] as const;
 

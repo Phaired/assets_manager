@@ -10,6 +10,7 @@ import { useEffect } from "react";
 
 import * as api from "./api";
 import type {
+  AssetKind,
   AudioBundle,
   AudioKind,
   Backend,
@@ -18,8 +19,10 @@ import type {
   Gen3d,
   InstallProgress,
   ProjectBundle,
+  ProjectDna,
   ServerStatus,
   StageKey,
+  SuggestTarget,
   Voice,
 } from "./types";
 
@@ -85,6 +88,16 @@ export function useSetProjectStyle(project: string | null) {
   });
 }
 
+export function useSetProjectDna(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (dna: ProjectDna) => api.setProjectDna(project as string, dna),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
 export function useCreateAsset(project: string | null) {
   const qc = useQueryClient();
   return useMutation({
@@ -93,6 +106,7 @@ export function useCreateAsset(project: string | null) {
       description: string;
       tags: string[];
       backend: Backend;
+      kind?: AssetKind;
     }) => api.createAsset({ project: project as string, ...vars }),
     onSuccess: () => {
       if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
@@ -105,6 +119,61 @@ export function useUpdateAsset(project: string | null) {
   return useMutation({
     mutationFn: (vars: { assetId: string; backend: Backend }) =>
       api.updateAsset(project as string, vars.assetId, vars.backend),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useRenameAsset(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { assetId: string; name: string }) =>
+      api.renameAsset(project as string, vars.assetId, vars.name),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useSetAssetTags(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { assetId: string; tags: string[] }) =>
+      api.setAssetTags(project as string, vars.assetId, vars.tags),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useSetAssetSeed(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { assetId: string; seed: number | null }) =>
+      api.setAssetSeed(project as string, vars.assetId, vars.seed),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useSetAssetPrompt(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { assetId: string; prompt: string }) =>
+      api.setAssetPrompt(project as string, vars.assetId, vars.prompt),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useDuplicateAsset(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (assetId: string) =>
+      api.duplicateAsset(project as string, assetId),
     onSuccess: () => {
       if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
     },
@@ -207,6 +276,22 @@ export function useServerStop() {
   });
 }
 
+// --- creative director (OpenAI text) --------------------------------------
+
+export function useSuggestPrompts(project: string | null) {
+  return useMutation({
+    mutationFn: (vars: { assetId?: string | null; target: SuggestTarget }) =>
+      api.suggestPrompts(project as string, vars.assetId ?? null, vars.target),
+    // Spend refresh comes through the project-changed event.
+  });
+}
+
+export function useIdeatePack(project: string | null) {
+  return useMutation({
+    mutationFn: (brief: string) => api.ideatePack(project as string, brief),
+  });
+}
+
 // --- audio: voices (global catalog) -------------------------------------
 
 export function useVoices() {
@@ -266,8 +351,20 @@ export function useCreateAudioItem(project: string | null) {
       name: string;
       text: string;
       voiceId?: string | null;
+      assetId?: string | null;
       params?: Record<string, unknown>;
     }) => api.createAudioItem({ project: project as string, ...vars }),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.audio(project) });
+    },
+  });
+}
+
+export function useSetAudioItemAsset(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { itemId: string; assetId: string | null }) =>
+      api.setAudioItemAsset(project as string, vars.itemId, vars.assetId),
     onSuccess: () => {
       if (project) qc.invalidateQueries({ queryKey: qk.audio(project) });
     },
