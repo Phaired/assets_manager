@@ -1,0 +1,221 @@
+name: build-wheels
+
+# Reconstruit les 2 wheels CUDA Hunyuan (custom_rasterizer + mesh_processor),
+# les publie sur leur release dédiée, met à jour Recipe::ext_wheels dans
+# installer.rs (url + sha256), commit le tout — et, par défaut, bump la version
+# de l'app + tag + publie un nouvel installeur. Bref : "rien à faire" hormis
+# cliquer "Run workflow" après avoir changé le tuple torch/python/cu dans
+# installer.rs.
+#
+# À lancer UNIQUEMENT quand le tuple épinglé change (rare). Le tuple est LU depuis
+# installer.rs (source unique de vérité), donc tu n'as rien à ressaisir.
+#
+# Prérequis runner (windows-latest) : MSVC v143 est préinstallé ; le CUDA Toolkit
+# est installé par le workflow. La compilation ne nécessite PAS de GPU.
+
+on:
+  workflow_dispatch:
+    inputs:
+      wheel_tag:
+        description: "Tag de la release des wheels (vide = auto-incrémente le -vN actuel)"
+        required: false
+        default: ""
+      hunyuan_ref:
+        description: "Commit/tag Hunyuan3D-2 à compiler (vide = lu depuis installer.rs)"
+        required: false
+        default: ""
+      cuda_version:
+        description: "Version du CUDA Toolkit à installer pour compiler"
+        required: false
+        default: "12.4.1"
+      release_bump:
+        description: "Après les wheels : bump + release de l'app ? (none = commit installer.rs seulement)"
+        required: true
+        default: "patch"
+        type: choice
+        options: [patch, minor, major, none]
+
+permissions:
+  contents: write          # publier les releases + pousser le commit/tag
+
+concurrency:
+  group: build-wheels
+  cancel-in-progress: false
+
+jobs:
+  wheels:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --- Lire le tuple depuis installer.rs (source unique de vérité) -------
+      - name: Resolve tuple from installer.rs
+        id: tuple
+        shell: pwsh
+        run: |
+          $src = Get-Content src-tauri/src/installer.rs -Raw
+          $py  = [regex]::Match($src, 'python_version:\s*"([^"]+)"').Groups[1].Value
+          $idx = [regex]::Match($src, 'torch_index_url:\s*"([^"]+)"').Groups[1].Value
+          $pkgsRaw = [regex]::Match($src, 'torch_packages:\s*&\[([^\]]+)\]').Groups[1].Value
+          $pkgs = ([regex]::Matches($pkgsRaw, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value }) -join ' '
+          $curTag = [regex]::Match($src, 'releases/download/([^/]+)/').Groups[1].Value
+
+          $ref = "${{ inputs.hunyuan_ref }}"
+          if (-not $ref) { $ref = [regex]::Match($src, 'Hunyuan3D-2/zip/([0-9A-Za-z]+)').Groups[1].Value }
+
+          $tag = "${{ inputs.wheel_tag }}"
+          if (-not $tag) {
+            if ($curTag -match '^(.*-v)(\d+)$') { $tag = $matches[1] + ([int]$matches[2] + 1) }
+            else { $tag = "$curTag-v2" }
+          }
+
+          if (-not $py -or -not $idx -or -not $pkgs -or -not $ref -or -not $tag) {
+            throw "Parsing du tuple KO (py=$py idx=$idx pkgs=$pkgs ref=$ref tag=$tag)"
+          }
+          "python=$py"       | Out-File $env:GITHUB_OUTPUT -Append
+          "torch_index=$idx" | Out-File $env:GITHUB_OUTPUT -Append
+          "torch_pkgs=$pkgs" | Out-File $env:GITHUB_OUTPUT -Append
+          "hunyuan_ref=$ref" | Out-File $env:GITHUB_OUTPUT -Append
+          "wheel_tag=$tag"   | Out-File $env:GITHUB_OUTPUT -Append
+          Write-Host "tuple: py=$py torch=[$pkgs] index=$idx ref=$ref wheel_tag=$tag"
+
+      # --- Toolchain de compilation : CUDA Toolkit (MSVC déjà sur le runner) -
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: ${{ inputs.cuda_version }}
+          method: network
+          sub-packages: '["nvcc", "cudart", "cccl", "thrust", "visual_studio_integration"]'
+
+      # --- uv (le script wheels crée un venv py3.10 + torch via uv) ----------
+      - name: Vendor uv
+        shell: pwsh
+        run: pwsh scripts/fetch-uv.ps1
+
+      # --- Compile les 2 wheels CUDA ----------------------------------------
+      - name: Build extension wheels
+        shell: pwsh
+        run: |
+          $pkgs = "${{ steps.tuple.outputs.torch_pkgs }}".Split(' ')
+          pwsh scripts/build-extension-wheels.ps1 `
+            -RepoZipRef "${{ steps.tuple.outputs.hunyuan_ref }}" `
+            -PythonVersion "${{ steps.tuple.outputs.python }}" `
+            -TorchIndex "${{ steps.tuple.outputs.torch_index }}" `
+            -TorchPackages $pkgs
+          $whls = Get-ChildItem dist-wheels -Filter *.whl
+          if ($whls.Count -lt 2) { throw "attendu 2 wheels, obtenu $($whls.Count)" }
+          $whls | ForEach-Object { Write-Host "built: $($_.Name)" }
+
+      # --- Publie la release des wheels (créée ou mise à jour) --------------
+      - name: Publish wheels release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.tuple.outputs.wheel_tag }}"
+          $files = (Get-ChildItem dist-wheels -Filter *.whl).FullName
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $files --clobber
+          } else {
+            gh release create $tag $files --title "Hunyuan wheels $tag" `
+              --notes "Wheels CUDA prebuild (custom_rasterizer + mesh_processor) consommees par l'auto-install in-app (installer.rs)."
+          }
+
+      # --- Patch installer.rs : url + sha256 des nouvelles wheels ------------
+      - name: Patch installer.rs
+        shell: pwsh
+        run: pwsh scripts/patch-installer-wheels.ps1 -Tag "${{ steps.tuple.outputs.wheel_tag }}"
+
+      # --- Bump version de l'app (sauf si release_bump = none) --------------
+      - name: Bump app version
+        id: bump
+        if: ${{ inputs.release_bump != 'none' }}
+        shell: pwsh
+        run: |
+          $level = "${{ inputs.release_bump }}"
+          $cur = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $p = $cur.Split('.')
+          switch ($level) {
+            "major" { $new = "$([int]$p[0]+1).0.0" }
+            "minor" { $new = "$($p[0]).$([int]$p[1]+1).0" }
+            default { $new = "$($p[0]).$($p[1]).$([int]$p[2]+1)" }
+          }
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          $pkg = (Get-Content package.json -Raw) -replace '("version":\s*")[^"]+(")', "`${1}$new`${2}"
+          [System.IO.File]::WriteAllText((Resolve-Path package.json), $pkg, $utf8)
+          $tc = (Get-Content src-tauri/tauri.conf.json -Raw) -replace '("version":\s*")[^"]+(")', "`${1}$new`${2}"
+          [System.IO.File]::WriteAllText((Resolve-Path src-tauri/tauri.conf.json), $tc, $utf8)
+          $cg = [regex]::Replace((Get-Content src-tauri/Cargo.toml -Raw), '(?m)^(version = ")[^"]+(")', "`${1}$new`${2}")
+          [System.IO.File]::WriteAllText((Resolve-Path src-tauri/Cargo.toml), $cg, $utf8)
+          "version=$new" | Out-File $env:GITHUB_OUTPUT -Append
+          Write-Host "bumped $cur -> $new"
+
+      # --- Commit le patch (+ bump) et, si bump, crée + pousse le tag -------
+      - name: Commit and tag
+        id: commit
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src-tauri/src/installer.rs package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+          $wheelTag = "${{ steps.tuple.outputs.wheel_tag }}"
+          $ver = "${{ steps.bump.outputs.version }}"
+          if ($ver) {
+            git commit -m "Rebuild Hunyuan wheels ($wheelTag) + release v$ver"
+            git tag "v$ver"
+            git push origin HEAD:${{ github.ref_name }}
+            git push origin "v$ver"
+            "app_tag=v$ver" | Out-File $env:GITHUB_OUTPUT -Append
+          } else {
+            git commit -m "Rebuild Hunyuan wheels ($wheelTag) + update installer.rs"
+            git push origin HEAD:${{ github.ref_name }}
+          }
+
+      # ====================================================================
+      # release_bump != none : build + publie l'installeur de l'app
+      # (mêmes étapes que release.yml, dans le même run pour éviter d'avoir
+      # besoin d'un PAT pour ré-déclencher release.yml sur le tag).
+      # ====================================================================
+      - uses: pnpm/action-setup@v4
+        if: ${{ inputs.release_bump != 'none' }}
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        if: ${{ inputs.release_bump != 'none' }}
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        if: ${{ inputs.release_bump != 'none' }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ inputs.release_bump != 'none' }}
+      - uses: swatinem/rust-cache@v2
+        if: ${{ inputs.release_bump != 'none' }}
+        with:
+          workspaces: src-tauri
+      - uses: actions/setup-python@v5
+        if: ${{ inputs.release_bump != 'none' }}
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Freeze Python worker
+        if: ${{ inputs.release_bump != 'none' }}
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m pip install -r worker/requirements.txt
+          python -m PyInstaller worker/worker.spec --noconfirm --distpath worker_dist --workpath worker_build
+          if (-not (Test-Path worker_dist/worker/worker.exe)) { throw "worker.exe manquant" }
+      - uses: tauri-apps/tauri-action@v0
+        if: ${{ inputs.release_bump != 'none' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ steps.commit.outputs.app_tag }}
+          releaseName: assets_gen ${{ steps.commit.outputs.app_tag }}
+          releaseBody: "Installeur Windows (NSIS). Worker Python gelé + wheels Hunyuan ${{ steps.tuple.outputs.wheel_tag }}."
+          releaseDraft: false
+          prerelease: false

@@ -22,7 +22,37 @@ Renseigne ta clé OpenAI dans **Réglages** (ou via `$OPENAI_API_KEY` / `.env`).
 ## Distribution (installeur autonome, sans Python côté utilisateur)
 
 L'installeur **embarque le worker Python gelé** : le PC cible n'a besoin ni de
-Python, ni de venv, ni de `run.bat`. En une commande :
+Python, ni de venv, ni de `run.bat`.
+
+### Release automatique (recommandé) — push d'un tag
+
+Un push de tag `vX.Y.Z` déclenche le workflow GitHub Actions
+[`.github/workflows/release.yml`](.github/workflows/release.yml) : sur un runner
+Windows il gèle le worker (PyInstaller), vendorise `uv`, build Tauri et **publie la
+release avec le `setup.exe` attaché** — plus de `.exe` poussé à la main. Comme le
+worker est re-gelé depuis `worker/*.py` à chaque run, **toute modif Python part
+automatiquement** dans l'installeur.
+
+```bat
+REM 1. bumper la version dans les 3 fichiers (le workflow refuse un tag qui ne matche pas) :
+REM    package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml
+git commit -am "Release vX.Y.Z"
+git tag vX.Y.Z
+git push origin master --tags    REM -> CI build + publie la release
+```
+
+> Si tu **ajoutes une dépendance** à `worker/requirements.txt` (ou un import
+> dynamique non détecté par PyInstaller), pense à la déclarer dans
+> `worker/worker.spec` (`hiddenimports` / `collect_all`), sinon le worker gelé
+> plantera **au runtime** chez l'utilisateur — teste l'installeur produit.
+>
+> Le workflow ne touche **jamais** la release des wheels CUDA Hunyuan
+> (`hunyuan-mv2-cu124-py310-v1`, référencée dans `installer.rs`) : tags distincts.
+> Son rebuild reste manuel (voir « Préparer les artefacts » plus bas).
+
+### Build local (debug / hors-ligne)
+
+En une commande :
 
 ```bat
 build-release.bat           REM vendorise uv + gèle le worker + construit l'installeur
@@ -80,21 +110,33 @@ HuggingFace, venv + code Hunyuan) :
 serveur est lancé avec `HF_HOME` sur ce dossier, donc il lit les poids au même
 endroit que l'installeur les a écrits.
 
-### Préparer les artefacts (dev, une fois par version)
+### Préparer les artefacts (les 2 extensions CUDA)
 
 Tout est tiré d'index publics SAUF les 2 extensions CUDA, introuvables ailleurs.
-Tu les compiles **une fois** et les héberges sur les **GitHub Releases** de l'app :
+Le tuple est figé : **Python 3.10 + torch 2.5.1 + cu124 + win-amd64** ; tout
+changement de ce tuple (dans `installer.rs`) ⇒ recompiler les wheels.
+
+**Automatique (recommandé) — workflow `build-wheels` :** après avoir changé le
+tuple dans `src-tauri/src/installer.rs` (et poussé), va dans **Actions →
+build-wheels → Run workflow**. Il lit le tuple depuis `installer.rs`, installe le
+CUDA Toolkit, compile les 2 wheels, **publie leur release** (tag auto-incrémenté
+`-vN`), **met à jour `Recipe::ext_wheels` (url + sha256) tout seul**, commit, puis
+(par défaut) bump+tag+publie un nouvel installeur. Tu n'as **rien d'autre à
+faire**. Voir [`.github/workflows/build-wheels.yml`](.github/workflows/build-wheels.yml).
+> ⚠️ Le workflow pousse un commit (+ tag) sur `master` via `GITHUB_TOKEN` : si la
+> branche est protégée contre ce token, autorise-le ou retire la protection.
+
+**Manuel (machine de build locale)**, si tu préfères :
 
 ```bat
 pwsh scripts\build-extension-wheels.ps1 -RepoZipRef <commit-sha>
 ```
 
-Prérequis de cette machine de build (pas des utilisateurs) : VS 2022 Build Tools
-(MSVC C++) + CUDA Toolkit 12.4+ (12.6 OK). Le script sort 2 `.whl` + leur sha256 ;
-uploade-les sur la Release, puis renseigne leurs URLs/sha dans `Recipe::ext_wheels`
-(et le commit dans `Recipe.repo_zip_url`) — voir `src-tauri/src/installer.rs`. Le
-tuple est figé : **Python 3.10 + torch 2.5.1 + cu124 + win-amd64** ; tout
-changement de version ⇒ recompiler les wheels.
+Prérequis de cette machine (pas des utilisateurs) : VS 2022 Build Tools (MSVC C++)
++ CUDA Toolkit 12.4+ (12.6 OK). Le script sort 2 `.whl` + leur sha256 ; uploade-les
+sur une Release **avec un nouveau tag**, puis renseigne leurs URLs/sha dans
+`Recipe::ext_wheels` (et le commit dans `Recipe.repo_zip_url`) — ou lance
+`scripts\patch-installer-wheels.ps1 -Tag <nouveau-tag>` qui le fait pour toi.
 
 > Pour le tuple par défaut, les wheels sont **déjà publiées** sur la release
 > [`hunyuan-mv2-cu124-py310-v1`](https://github.com/Phaired/assets_manager/releases/tag/hunyuan-mv2-cu124-py310-v1)

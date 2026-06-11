@@ -1,0 +1,93 @@
+name: release
+
+# Publie automatiquement l'installeur Windows quand un tag vX.Y.Z est poussé.
+# Reproduit build-release.bat sur un runner Windows :
+#   1) gèle le worker Python (PyInstaller)  -> worker_dist/worker
+#   2) vendorise uv.exe                      -> vendor/uv/uv.exe
+#   3) build Tauri + crée la release GitHub avec le setup.exe attaché
+#
+# Le worker étant re-gelé depuis worker/*.py à chaque run, toute modif Python
+# part automatiquement dans l'installeur. La release des wheels CUDA Hunyuan
+# (tag hunyuan-mv2-cu124-py310-v1, référencée en dur dans installer.rs) n'est
+# JAMAIS touchée par ce workflow — voir le plan / README pour son rebuild manuel.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write          # créer la release + uploader les bundles
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Garde-fou : le tag doit matcher la version des 3 fichiers ---------
+      # (version bump ×3 : package.json, tauri.conf.json, Cargo.toml)
+      - name: Verify version matches tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v',''
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauri = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($pkg -ne $tag -or $tauri -ne $tag -or $cargo -ne $tag) {
+            throw "Version mismatch: tag=$tag package.json=$pkg tauri=$tauri cargo=$cargo. Bumpe les 3 fichiers avant de tagger."
+          }
+          Write-Host "Version OK: $tag"
+
+      # --- Node / pnpm (npm crashe sur ce projet) ---------------------------
+      # lockfileVersion 9 => pnpm 9+. Pas de champ packageManager dans
+      # package.json, donc la version doit être précisée ici.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # --- Rust (+ cache) ---------------------------------------------------
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # --- Python 3.11 : geler le worker (re-freeze => modifs python incluses)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Freeze Python worker (PyInstaller)
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m pip install -r worker/requirements.txt
+          python -m PyInstaller worker/worker.spec --noconfirm `
+            --distpath worker_dist --workpath worker_build
+          if (-not (Test-Path worker_dist/worker/worker.exe)) {
+            throw "worker_dist/worker/worker.exe manquant"
+          }
+
+      # --- Vendoriser uv.exe (ressource Tauri pour l'installeur Hunyuan) ----
+      - name: Vendor uv
+        shell: pwsh
+        run: pwsh scripts/fetch-uv.ps1
+
+      # --- Build Tauri + création/upload de la release sur le tag courant ---
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: assets_gen ${{ github.ref_name }}
+          releaseBody: "Installeur Windows (NSIS). Worker Python gelé et embarqué."
+          releaseDraft: false
+          prerelease: false
