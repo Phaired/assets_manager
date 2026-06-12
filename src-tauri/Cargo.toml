@@ -1,6 +1,6 @@
 [package]
 name = "assets-gen"
-version = "0.4.1"
+version = "0.4.2"
 description = "assets_gen - pipeline GPT-image -> Hunyuan3D -> OBJ"
 authors = ["assets_gen"]
 edition = "2021"
