@@ -3,6 +3,9 @@
 
 export type Backend = "auto" | "v21" | "mv2";
 export type StageKey = "multiview" | "model3d" | "export" | "texture";
+/** Pipeline stages plus on-demand state keys persisted in state.json
+ *  ("decimate" is not a pipeline stage — no StageCard — but survives restarts). */
+export type ExtraStageKey = StageKey | "decimate" | "paint3d";
 export type StageStatus = "pending" | "queued" | "running" | "done" | "error";
 /** "model" = image → multivue → 3D ; "texture" = image seamless tileable. */
 export type AssetKind = "model" | "texture";
@@ -15,10 +18,14 @@ export interface Asset {
   /** Defaults to "model" on legacy assets. */
   kind: AssetKind;
   backend: Backend;
-  source: "openai" | "manual";
+  /** "openai" = generated multiview, "manual" = uploaded image,
+   *  "text" = native text-to-3D (mv2 + HunyuanDiT, no image). */
+  source: "openai" | "manual" | "text";
   createdAt: string; // disk: created_at
   /** Per-asset 3D generation override (partial). Absent → uses global defaults. */
   gen3d?: Partial<Gen3d>;
+  /** Per-asset decimation override (partial). Absent → uses global defaults. */
+  decimate?: Partial<DecimateParams>;
   /** Per-asset 3D seed override. Absent → derived from the asset id. */
   seed?: number;
   /** Per-asset multiview prompt override. Absent → uses the global template. */
@@ -64,7 +71,7 @@ export interface Project {
 export interface ProjectState {
   version: number;
   estimatedSpendUsd: number; // disk: estimated_spend_usd
-  assets: Record<string, Partial<Record<StageKey, StageState>>>;
+  assets: Record<string, Partial<Record<ExtraStageKey, StageState>>>;
 }
 
 export interface JobCurrent {
@@ -132,11 +139,59 @@ export interface Gen3d {
   faceCountV21: number;
 }
 
+/** Méthode de réduction : auto = pool de candidats départagés par fidélité. */
+export type DecimateMode = "auto" | "preserve" | "rebake";
+
+export interface DecimateParams {
+  targetFaceNum: number;
+  mode: DecimateMode;
+  qualityThr: number;
+  boundaryWeight: number;
+  preserveBoundary: boolean;
+  preserveNormal: boolean;
+  optimalPlacement: boolean;
+  planarQuadric: boolean;
+  bakeNormalMap: boolean;
+  normalMapResolution: number; // 1024 | 2048
+}
+
+/** One candidate tried by the auto mode (for the result details). */
+export interface DecimateCandidate {
+  method: "preserve" | "rebake" | "meshopt";
+  fidelity?: number;
+  faces?: number;
+  error?: string;
+}
+
+/** /decimate response — also persisted as the "decimate" stage meta. */
+export interface DecimateResult {
+  facesBefore: number;
+  facesAfter: number;
+  verticesBefore: number;
+  verticesAfter: number;
+  fileSizeBefore: number;
+  fileSizeAfter: number;
+  /** 100 − RMS Hausdorff (% de la diagonale bbox du brut). */
+  fidelity: number;
+  hausdorffRmsPct: number;
+  hausdorffMaxPct: number;
+  baked: boolean;
+  normalMapResolution: number;
+  uvOverlapPct: number;
+  method: "preserve" | "rebake" | "meshopt";
+  paramsUsed: Record<string, unknown>;
+  candidatesTried: DecimateCandidate[];
+  output: string;
+  note?: string;
+}
+
 export interface HunyuanBackendConfig {
   dir: string;
   python: string;
   port: number;
   modelPath: string;
+  /** mv2 only: native text-to-3D (HunyuanDiT) installed & enabled. */
+  text3dEnabled: boolean;
 }
 
 export interface HunyuanEntryPatch {
@@ -174,6 +229,7 @@ export interface ConfigPublic {
   elevenlabsKeySet: boolean;
   audio: AudioConfig;
   gen3d: Gen3d;
+  decimate: DecimateParams;
   hunyuan: {
     v21: HunyuanBackendConfig;
     mv2: HunyuanBackendConfig;
@@ -197,6 +253,7 @@ export interface ConfigPatch {
   elevenlabsApiKey?: string;
   audio?: Partial<AudioConfig>;
   gen3d?: Partial<Gen3d>;
+  decimate?: Partial<DecimateParams>;
   hunyuan?: {
     v21?: HunyuanEntryPatch;
     mv2?: HunyuanEntryPatch;

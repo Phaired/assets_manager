@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   Square,
   Cpu,
+  Type,
 } from "lucide-react";
 
 import type { InstallPhase, InstallProgress } from "../lib/types";
@@ -13,6 +14,8 @@ import {
   useInstallStatus,
   useInstallBackend,
   useCancelInstall,
+  useInstallText3d,
+  useConfig,
 } from "../lib/queries";
 import { Button } from "@/components/ui/button";
 import {
@@ -46,11 +49,15 @@ export function HunyuanInstaller({ onClose }: { onClose: () => void }) {
   const statusQ = useInstallStatus();
   const install = useInstallBackend();
   const cancel = useCancelInstall();
+  const installText3d = useInstallText3d();
+  const configQ = useConfig();
 
   const st: InstallProgress | null = statusQ.data ?? null;
   const running = st?.running ?? false;
   const done = st?.done ?? false;
   const error = st?.error ?? null;
+  const mv2Installed = !!configQ.data?.hunyuan?.mv2?.python;
+  const text3dEnabled = !!configQ.data?.hunyuan?.mv2?.text3dEnabled;
   const curIdx = useMemo(
     () => (st ? phaseIndex(st.phase) : -1),
     [st],
@@ -149,6 +156,56 @@ export function HunyuanInstaller({ onClose }: { onClose: () => void }) {
             <pre className="max-h-40 overflow-auto rounded-md border border-border bg-muted p-3 font-mono text-xs whitespace-pre-wrap text-muted-foreground">
               {st.logTail}
             </pre>
+          )}
+
+          {/* Optional add-on: native offline text-to-3D (HunyuanDiT). */}
+          {mv2Installed && (
+            <div className="flex flex-col gap-2 rounded-md border border-border bg-secondary/20 px-3 py-3">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Type size={15} /> Text-to-3D natif (optionnel)
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Génère un modèle 3D directement depuis un texte, hors-ligne (sans
+                OpenAI), via HunyuanDiT. Téléchargement supplémentaire ~8 Go ;
+                VRAM accrue au démarrage du serveur.
+              </p>
+              {text3dEnabled ? (
+                <div className="flex items-center gap-3">
+                  <span className="flex items-center gap-2 text-sm text-ok">
+                    <CheckCircle2 size={15} /> Activé
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    disabled={running || installText3d.isPending}
+                    onClick={() => installText3d.mutate()}
+                    title="Réinstalle les dépendances + le modèle et redémarre le serveur"
+                  >
+                    {installText3d.isPending ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <Download size={13} />
+                    )}
+                    Réparer / réinstaller
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-fit"
+                  disabled={running || installText3d.isPending}
+                  onClick={() => installText3d.mutate()}
+                >
+                  {installText3d.isPending ? (
+                    <Loader2 size={15} className="animate-spin" />
+                  ) : (
+                    <Download size={15} />
+                  )}
+                  Activer le text-to-3D (~8 Go)
+                </Button>
+              )}
+            </div>
           )}
         </div>
 

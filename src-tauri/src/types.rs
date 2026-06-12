@@ -30,6 +30,10 @@ pub struct Asset {
     /// the asset uses the global defaults. Merged over config `gen3d` at run time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gen3d: Option<Value>,
+    /// Per-asset decimation override (partial decimate, camelCase). Absent when
+    /// the asset uses the global defaults. Merged over config `decimate`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decimate: Option<Value>,
     /// Per-asset 3D seed override. Absent → derived from the asset id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
@@ -73,6 +77,7 @@ impl Asset {
             // On disk gen3d is stored snake_case; expose it to the bridge as the
             // camelCase the UI uses.
             gen3d: v.get("gen3d").map(gen3d_disk_to_camel),
+            decimate: v.get("decimate").map(decimate_disk_to_camel),
             seed: v.get("seed").and_then(|x| x.as_i64()),
             prompt_override: v
                 .get("prompt_override")
@@ -369,6 +374,144 @@ impl Gen3d {
     }
 }
 
+// --- Decimate -------------------------------------------------------------
+
+/// On-demand mesh decimation parameters (camelCase mirror of the worker's
+/// pydantic `DecimateParams`; serialised as-is into the `/decimate` request).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecimateParams {
+    pub target_face_num: i64,
+    /// "auto" (candidate pool, best Hausdorff wins) | "preserve" | "rebake".
+    pub mode: String,
+    pub quality_thr: f64,
+    pub boundary_weight: f64,
+    pub preserve_boundary: bool,
+    pub preserve_normal: bool,
+    pub optimal_placement: bool,
+    pub planar_quadric: bool,
+    pub bake_normal_map: bool,
+    pub normal_map_resolution: i64,
+}
+
+impl DecimateParams {
+    /// Build from the snake_case `decimate` config sub-object.
+    pub fn from_config(v: &Value) -> Self {
+        DecimateParams {
+            target_face_num: int_field(v, "target_face_num", 20000),
+            mode: v
+                .get("mode")
+                .and_then(|x| x.as_str())
+                .unwrap_or("auto")
+                .to_string(),
+            quality_thr: v.get("quality_thr").and_then(|x| x.as_f64()).unwrap_or(1.0),
+            boundary_weight: v
+                .get("boundary_weight")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(3.0),
+            preserve_boundary: v
+                .get("preserve_boundary")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true),
+            preserve_normal: v
+                .get("preserve_normal")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true),
+            optimal_placement: v
+                .get("optimal_placement")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true),
+            planar_quadric: v
+                .get("planar_quadric")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
+            bake_normal_map: v
+                .get("bake_normal_map")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true),
+            normal_map_resolution: int_field(v, "normal_map_resolution", 1024),
+        }
+    }
+}
+
+/// Partial decimate override from the UI (camelCase in, snake_case out).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DecimatePatch {
+    pub target_face_num: Option<i64>,
+    pub mode: Option<String>,
+    pub quality_thr: Option<f64>,
+    pub boundary_weight: Option<f64>,
+    pub preserve_boundary: Option<bool>,
+    pub preserve_normal: Option<bool>,
+    pub optimal_placement: Option<bool>,
+    pub planar_quadric: Option<bool>,
+    pub bake_normal_map: Option<bool>,
+    pub normal_map_resolution: Option<i64>,
+}
+
+impl DecimatePatch {
+    /// The set fields as a snake_case JSON object (the on-disk decimate shape).
+    pub fn to_snake_object(&self) -> serde_json::Map<String, Value> {
+        let mut o = serde_json::Map::new();
+        if let Some(x) = self.target_face_num {
+            o.insert("target_face_num".into(), Value::from(x));
+        }
+        if let Some(x) = &self.mode {
+            o.insert("mode".into(), Value::String(x.clone()));
+        }
+        if let Some(x) = self.quality_thr {
+            o.insert("quality_thr".into(), Value::from(x));
+        }
+        if let Some(x) = self.boundary_weight {
+            o.insert("boundary_weight".into(), Value::from(x));
+        }
+        if let Some(x) = self.preserve_boundary {
+            o.insert("preserve_boundary".into(), Value::from(x));
+        }
+        if let Some(x) = self.preserve_normal {
+            o.insert("preserve_normal".into(), Value::from(x));
+        }
+        if let Some(x) = self.optimal_placement {
+            o.insert("optimal_placement".into(), Value::from(x));
+        }
+        if let Some(x) = self.planar_quadric {
+            o.insert("planar_quadric".into(), Value::from(x));
+        }
+        if let Some(x) = self.bake_normal_map {
+            o.insert("bake_normal_map".into(), Value::from(x));
+        }
+        if let Some(x) = self.normal_map_resolution {
+            o.insert("normal_map_resolution".into(), Value::from(x));
+        }
+        o
+    }
+}
+
+/// Map the snake_case `decimate` keys to their camelCase bridge names (same
+/// round-trip contract as `gen3d_disk_to_camel`).
+fn decimate_disk_to_camel(v: &Value) -> Value {
+    const KEYS: [(&str, &str); 10] = [
+        ("target_face_num", "targetFaceNum"),
+        ("mode", "mode"),
+        ("quality_thr", "qualityThr"),
+        ("boundary_weight", "boundaryWeight"),
+        ("preserve_boundary", "preserveBoundary"),
+        ("preserve_normal", "preserveNormal"),
+        ("optimal_placement", "optimalPlacement"),
+        ("planar_quadric", "planarQuadric"),
+        ("bake_normal_map", "bakeNormalMap"),
+        ("normal_map_resolution", "normalMapResolution"),
+    ];
+    let mut out = serde_json::Map::new();
+    for (snake, camel) in KEYS {
+        if let Some(x) = v.get(snake) {
+            out.insert(camel.to_string(), x.clone());
+        }
+    }
+    Value::Object(out)
+}
+
 // --- Hunyuan public sub-config -----------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
@@ -378,6 +521,8 @@ pub struct HunyuanEntryPublic {
     pub python: String,
     pub port: i64,
     pub model_path: String,
+    /// mv2 only: whether native text-to-3D (HunyuanDiT) has been installed/enabled.
+    pub text3d_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -452,6 +597,7 @@ pub struct ConfigPublic {
     pub elevenlabs_key_set: bool,
     pub audio: AudioConfigPublic,
     pub gen3d: Gen3d,
+    pub decimate: DecimateParams,
     pub hunyuan: HunyuanPublic,
 }
 
@@ -463,6 +609,7 @@ impl ConfigPublic {
         elevenlabs_key_set: bool,
     ) -> Self {
         let gen3d_v = cfg.get("gen3d").cloned().unwrap_or(Value::Null);
+        let decimate_v = cfg.get("decimate").cloned().unwrap_or(Value::Null);
         let hun = cfg.get("hunyuan").cloned().unwrap_or(Value::Null);
         ConfigPublic {
             openai_model: str_field(cfg, "openai_model"),
@@ -495,6 +642,7 @@ impl ConfigPublic {
             elevenlabs_key_set,
             audio: AudioConfigPublic::from_config(cfg),
             gen3d: Gen3d::from_config(&gen3d_v),
+            decimate: DecimateParams::from_config(&decimate_v),
             hunyuan: HunyuanPublic {
                 v21: hunyuan_entry(&hun, "v21"),
                 mv2: hunyuan_entry(&hun, "mv2"),
@@ -510,6 +658,10 @@ fn hunyuan_entry(hun: &Value, key: &str) -> HunyuanEntryPublic {
         python: str_field(&e, "python"),
         port: int_field(&e, "port", 0),
         model_path: str_field(&e, "model_path"),
+        text3d_enabled: e
+            .get("text3d_enabled")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
     }
 }
 
@@ -634,6 +786,7 @@ pub struct ConfigPatch {
     pub elevenlabs_api_key: Option<String>,
     pub audio: Option<AudioPatch>,
     pub gen3d: Option<Gen3dPatch>,
+    pub decimate: Option<DecimatePatch>,
     pub hunyuan: Option<HunyuanPatch>,
 }
 
@@ -689,6 +842,9 @@ impl ConfigPatch {
         }
         if let Some(g) = &self.gen3d {
             obj.insert("gen3d".into(), Value::Object(g.to_snake_object()));
+        }
+        if let Some(d) = &self.decimate {
+            obj.insert("decimate".into(), Value::Object(d.to_snake_object()));
         }
         if let Some(h) = &self.hunyuan {
             let mut ho = serde_json::Map::new();

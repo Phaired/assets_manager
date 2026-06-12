@@ -23,6 +23,17 @@ export function planAssetImages(
   multiviewStatus: StageStatus | undefined,
   server: ServerStatus | null,
 ): AssetImagePlan {
+  // Native text-to-3D: the prompt feeds HunyuanDiT inside the mv2 server — there
+  // is no image prerequisite, so the 3D stage is never image-blocked.
+  if (asset.source === "text") {
+    return {
+      effectiveBackend: "mv2",
+      mode: "auto",
+      feedsLabel: "texte (prompt)",
+      model3dBlocked: null,
+    };
+  }
+
   const multiviewDone = multiviewStatus === "done";
   const sourceManual = asset.source === "manual";
   const hasAnyImage = multiviewDone || sourceManual;

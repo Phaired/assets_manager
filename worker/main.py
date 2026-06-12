@@ -6,7 +6,8 @@ Importable as ``worker.main:app``. Launched by Rust from the project venv:
 
 Endpoints (see CONTRACT.md "Python worker sidecar — HTTP API"):
     GET  /health     -> {"ok": true}
-    POST /gen3d      -> {faces?, textures?, reduced, backend, seed, output, note?}
+    POST /gen3d      -> {faces?, textures?, reduced, backend, seed, output, rawOutput?, note?}
+    POST /decimate   -> {facesBefore, facesAfter, fidelity, baked, method, ...}
     POST /export     -> {faces, textured}
 
 The OpenAI image stages (multiview sheet, image edit) live in Rust
@@ -72,11 +73,50 @@ class Gen3dRequest(BaseModel):
     dest: str
     imagePath: Optional[str] = None
     viewDir: Optional[str] = None
+    rawDest: Optional[str] = None
+    # Native text-to-3D (mv2 only): when set, HunyuanDiT generates the image from
+    # this prompt server-side (no views/image needed). Requires the mv2 server
+    # launched with --enable_t23d.
+    caption: Optional[str] = None
 
 
 class ExportRequest(BaseModel):
     glb: str
     dest: str
+
+
+class DecimateParams(BaseModel):
+    """Decimation parameters as sent by Rust (camelCase)."""
+    targetFaceNum: int = 20000
+    mode: Literal["auto", "preserve", "rebake"] = "auto"
+    qualityThr: float = 1.0
+    boundaryWeight: float = 3.0
+    preserveBoundary: bool = True
+    preserveNormal: bool = True
+    optimalPlacement: bool = True
+    planarQuadric: bool = False
+    bakeNormalMap: bool = True
+    normalMapResolution: int = 1024
+
+    def to_snake(self) -> dict:
+        return {
+            "target_face_num": self.targetFaceNum,
+            "mode": self.mode,
+            "quality_thr": self.qualityThr,
+            "boundary_weight": self.boundaryWeight,
+            "preserve_boundary": self.preserveBoundary,
+            "preserve_normal": self.preserveNormal,
+            "optimal_placement": self.optimalPlacement,
+            "planar_quadric": self.planarQuadric,
+            "bake_normal_map": self.bakeNormalMap,
+            "normal_map_resolution": self.normalMapResolution,
+        }
+
+
+class DecimateRequest(BaseModel):
+    raw: str
+    dest: str
+    params: DecimateParams = Field(default_factory=DecimateParams)
 
 
 # --------------------------------------------------------------------------- #
@@ -96,31 +136,62 @@ def gen3d(req: Gen3dRequest) -> dict:
     seed = req.seed
 
     try:
+        texture = bool(gen3d_dict["texture"])
         if req.backend == "v21":
+            if req.caption and req.caption.strip():
+                raise HTTPException(
+                    status_code=422,
+                    detail="text-to-3D (caption) non supporte par v21 : utiliser le backend mv2")
             if not req.imagePath:
                 raise HTTPException(status_code=422, detail="imagePath requis pour le backend v21")
             image = Path(req.imagePath)
             if not image.is_file():
                 raise HTTPException(status_code=422, detail=f"image introuvable: {image}")
             glb_bytes = stages.generate_v21(req.baseUrl, image, seed=seed, gen3d=gen3d_dict)
-            meta = _finalize_from_bytes(glb_bytes, dest, gen3d_dict["target_face_num"])
+            meta = _finalize_from_bytes(glb_bytes, dest, gen3d_dict["target_face_num"],
+                                        raw_dest=req.rawDest, texture=texture)
         else:  # mv2
-            if not req.viewDir:
-                raise HTTPException(status_code=422, detail="viewDir requis pour le backend mv2")
-            view_dir = Path(req.viewDir)
-            for name in stages.VIEW_FILES:
-                if not (view_dir / name).is_file():
+            text_mode = bool(req.caption and req.caption.strip())
+            view_dir = None
+            if not text_mode:
+                if not req.viewDir:
                     raise HTTPException(
                         status_code=422,
-                        detail=f"vue manquante pour mv2: {view_dir / name}")
-            raw = stages.generate_mv2(req.baseUrl, view_dir, seed=seed, gen3d=gen3d_dict)
-            meta = stages.finalize_glb(Path(raw), dest, gen3d_dict["target_face_num"])
+                        detail="viewDir (ou caption) requis pour le backend mv2")
+                view_dir = Path(req.viewDir)
+                for name in stages.VIEW_FILES:
+                    if not (view_dir / name).is_file():
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"vue manquante pour mv2: {view_dir / name}")
+            raw = stages.generate_mv2(
+                req.baseUrl, view_dir, seed=seed, gen3d=gen3d_dict,
+                texture=texture, caption=req.caption if text_mode else None)
+            meta = stages.finalize_glb(
+                Path(raw), dest, gen3d_dict["target_face_num"],
+                raw_destination=Path(req.rawDest) if req.rawDest else None,
+                texture=texture)
     except HTTPException:
         raise
     except Exception as error:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=_msg(error))
 
     return {**meta, "backend": req.backend, "seed": seed, "output": str(dest)}
+
+
+@app.post("/decimate")
+def decimate(req: DecimateRequest) -> dict:
+    """Re-decimate a persisted raw GLB with tunable quality parameters,
+    Hausdorff fidelity scoring and optional tangent-space normal-map bake."""
+    raw = Path(req.raw)
+    if not raw.is_file():
+        raise HTTPException(status_code=422, detail=f"GLB brut introuvable: {raw}")
+    try:
+        return stages.decimate_glb(raw, Path(req.dest), req.params.to_snake())
+    except HTTPException:
+        raise
+    except Exception as error:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=_msg(error))
 
 
 @app.post("/export")
@@ -141,7 +212,8 @@ def export(req: ExportRequest) -> dict:
 # Helpers
 # --------------------------------------------------------------------------- #
 
-def _finalize_from_bytes(glb_bytes: bytes, dest: Path, target_faces: int) -> dict:
+def _finalize_from_bytes(glb_bytes: bytes, dest: Path, target_faces: int,
+                         raw_dest: Optional[str] = None, *, texture: bool = True) -> dict:
     """v21 returns GLB bytes; persist to a temp file then finalize (reduce/copy)."""
     import tempfile
 
@@ -149,7 +221,9 @@ def _finalize_from_bytes(glb_bytes: bytes, dest: Path, target_faces: int) -> dic
     with tempfile.TemporaryDirectory(dir=dest.parent) as temp_dir:
         raw = Path(temp_dir) / "raw.glb"
         raw.write_bytes(glb_bytes)
-        return stages.finalize_glb(raw, dest, target_faces)
+        return stages.finalize_glb(raw, dest, target_faces,
+                                   raw_destination=Path(raw_dest) if raw_dest else None,
+                                   texture=texture)
 
 
 def _msg(error: Exception) -> str:

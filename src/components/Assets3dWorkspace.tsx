@@ -37,8 +37,9 @@ export function Assets3dWorkspace() {
               Nouvel asset 3D
             </h2>
             <p className="text-sm text-muted-foreground">
-              Décris l'objet — l'image, les vues multiples et le modèle 3D
-              sont générés en chaîne.
+              Choisis un mode, décris l'objet, et lance la génération. En
+              Text-to-3D, le modèle est créé directement depuis le texte —
+              sans OpenAI.
             </p>
           </div>
           <NewAssetForm project={project} onCreated={setAssetId} />

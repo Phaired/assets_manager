@@ -77,6 +77,26 @@ impl Store {
         Ok(self.asset_dir(project, asset_id)?.join("model.glb"))
     }
 
+    /// Untouched pre-decimation GLB persisted by the model3d stage, so /decimate
+    /// can re-reduce without re-generating.
+    pub fn model_raw_path(&self, project: &str, asset_id: &str) -> AppResult<PathBuf> {
+        Ok(self.asset_dir(project, asset_id)?.join("model_raw.glb"))
+    }
+
+    /// Background-removed reference image the patched gradio saved during the 3D
+    /// stage (its rembg'd `main_image` — the t2i image for text-to-3D, the front
+    /// view otherwise). Used by the standalone paint pass. Distinct from
+    /// source.png (user/openai).
+    pub fn paint_ref_path(&self, project: &str, asset_id: &str) -> AppResult<PathBuf> {
+        Ok(self.asset_dir(project, asset_id)?.join("ref.png"))
+    }
+
+    /// The untextured model.glb copied aside before a paint pass (for revert /
+    /// re-paint).
+    pub fn model_untextured_path(&self, project: &str, asset_id: &str) -> AppResult<PathBuf> {
+        Ok(self.asset_dir(project, asset_id)?.join("model_untextured.glb"))
+    }
+
     pub fn source_image_path(&self, project: &str, asset_id: &str) -> AppResult<PathBuf> {
         Ok(self.asset_dir(project, asset_id)?.join("source.png"))
     }
@@ -217,6 +237,7 @@ impl Store {
         tags: Vec<String>,
         backend: &str,
         kind: &str,
+        source: &str,
     ) -> AppResult<Value> {
         let _guard = LOCK.lock();
         let mut data = self.get_project(project)?;
@@ -243,7 +264,7 @@ impl Store {
             "tags": tags,
             "kind": kind,
             "backend": backend,
-            "source": "openai",
+            "source": source,
             "created_at": now(),
         });
         data.get_mut("assets")
@@ -390,6 +411,27 @@ impl Store {
         self.save_project(project, &data)
     }
 
+    /// Set (or clear, when `override_obj` is empty) the per-asset decimate
+    /// override stored on the asset in project.json (snake_case, like gen3d).
+    pub fn set_asset_decimate(
+        &self,
+        project: &str,
+        asset_id: &str,
+        override_obj: Value,
+    ) -> AppResult<()> {
+        let empty = override_obj
+            .as_object()
+            .map(|m| m.is_empty())
+            .unwrap_or(true);
+        self.mutate_asset(project, asset_id, |o| {
+            if empty {
+                o.remove("decimate");
+            } else {
+                o.insert("decimate".into(), override_obj);
+            }
+        })
+    }
+
     /// Change an asset's 3D backend ("auto" | "v21" | "mv2") after creation.
     pub fn set_asset_backend(&self, project: &str, asset_id: &str, backend: &str) -> AppResult<()> {
         let _guard = LOCK.lock();
@@ -509,6 +551,7 @@ impl Store {
             .unwrap_or_default();
         let backend = src.get("backend").and_then(|x| x.as_str()).unwrap_or("auto");
         let kind = src.get("kind").and_then(|x| x.as_str()).unwrap_or("model");
+        let source = src.get("source").and_then(|x| x.as_str()).unwrap_or("openai");
 
         let new = self.add_asset(
             project,
@@ -517,6 +560,7 @@ impl Store {
             tags,
             backend,
             kind,
+            source,
         )?;
         let new_id = new.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
 

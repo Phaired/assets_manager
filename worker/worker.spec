@@ -24,8 +24,9 @@ binaries = []
 hiddenimports = ["worker", "worker.main", "worker.stages"]
 
 # Dynamic-import-heavy / native packages: pull everything so nothing is missed
-# at runtime (uvicorn loops & protocols, pymeshlab native libs, trimesh data).
-for pkg in ("pymeshlab", "uvicorn", "trimesh", "gradio_client"):
+# at runtime (uvicorn loops & protocols, pymeshlab native libs, trimesh data,
+# xatlas/meshoptimizer compiled extensions used by /decimate).
+for pkg in ("pymeshlab", "uvicorn", "trimesh", "gradio_client", "xatlas", "meshoptimizer"):
     pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
     datas += pkg_datas
     binaries += pkg_binaries

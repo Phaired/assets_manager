@@ -16,6 +16,7 @@ import type {
   Backend,
   ConfigPatch,
   ConfigPublic,
+  DecimateParams,
   Gen3d,
   InstallProgress,
   ProjectBundle,
@@ -107,6 +108,7 @@ export function useCreateAsset(project: string | null) {
       tags: string[];
       backend: Backend;
       kind?: AssetKind;
+      source?: "openai" | "manual" | "text";
     }) => api.createAsset({ project: project as string, ...vars }),
     onSuccess: () => {
       if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
@@ -218,6 +220,44 @@ export function useSetAssetGen3d(project: string | null) {
     mutationFn: (vars: { assetId: string; gen3d: Partial<Gen3d> }) =>
       api.setAssetGen3d(project as string, vars.assetId, vars.gen3d),
     onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useSetAssetDecimate(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { assetId: string; decimate: Partial<DecimateParams> }) =>
+      api.setAssetDecimate(project as string, vars.assetId, vars.decimate),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useDecimateModel(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      assetId: string;
+      params?: Partial<DecimateParams>;
+    }) => api.decimateModel(project as string, vars.assetId, vars.params),
+    onSettled: () => {
+      // The "decimate" stage state changed whether it succeeded or failed.
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+/** Standalone texture-paint pass on an untextured model (texture later). */
+export function usePaintModel(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { assetId: string }) =>
+      api.paintModel(project as string, vars.assetId),
+    onSettled: () => {
+      // The "paint3d" stage state changed whether it succeeded or failed.
       if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
     },
   });
@@ -406,6 +446,14 @@ export function useInstallBackend() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (backend: "v21" | "mv2") => api.installBackend(backend),
+    onSuccess: (data) => qc.setQueryData(qk.install, data),
+  });
+}
+
+export function useInstallText3d() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.installText3d(),
     onSuccess: (data) => qc.setQueryData(qk.install, data),
   });
 }

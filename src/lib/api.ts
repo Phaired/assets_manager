@@ -14,6 +14,8 @@ import type {
   ConfigPatch,
   ConfigPublic,
   CostsSummary,
+  DecimateParams,
+  DecimateResult,
   Gen3d,
   InstallProgress,
   JobCurrent,
@@ -62,6 +64,8 @@ export function createAsset(args: {
   tags: string[];
   backend: Backend;
   kind?: AssetKind;
+  /** "text" creates a native text-to-3D asset (forces mv2, no image). */
+  source?: "openai" | "manual" | "text";
 }): Promise<Asset> {
   return invoke<Asset>("create_asset", args);
 }
@@ -153,6 +157,40 @@ export function setAssetGen3d(
   return invoke<void>("set_asset_gen3d", { project, assetId, gen3d });
 }
 
+/** Set (or clear, when `decimate` is empty) the per-asset decimation override. */
+export function setAssetDecimate(
+  project: string,
+  assetId: string,
+  decimate: Partial<DecimateParams>,
+): Promise<void> {
+  return invoke<void>("set_asset_decimate", { project, assetId, decimate });
+}
+
+/** Re-decimate model_raw.glb → model.glb. Direct call (not a queue job):
+ *  resolves with the result once the reduction finishes (seconds). `params`
+ *  is a one-shot override merged over config defaults + asset override. */
+export function decimateModel(
+  project: string,
+  assetId: string,
+  params?: Partial<DecimateParams>,
+): Promise<DecimateResult> {
+  return invoke<DecimateResult>("decimate_model", {
+    project,
+    assetId,
+    params: params ?? null,
+  });
+}
+
+/** Texture an untextured model.glb via the standalone Hunyuan paint pass. Direct
+ *  call (not a queue job); frees the GPU, runs the paint pass, overwrites
+ *  model.glb. Resolves when texturing finishes (minutes). */
+export function paintModel(
+  project: string,
+  assetId: string,
+): Promise<{ painted: boolean }> {
+  return invoke("paint_model", { project, assetId });
+}
+
 /** Edit the asset's source image via OpenAI. `maskBytes` (optional) restricts the
  *  edit to the painted (transparent) region. Overwrites source.png. */
 export function editImage(
@@ -225,6 +263,12 @@ export function installBackend(
   backend: "v21" | "mv2",
 ): Promise<InstallProgress> {
   return invoke<InstallProgress>("install_backend", { backend });
+}
+
+/** Optional add-on: download the native text-to-image model (HunyuanDiT) and
+ *  enable text-to-3D on the mv2 server. Requires mv2 already installed. */
+export function installText3d(): Promise<InstallProgress> {
+  return invoke<InstallProgress>("install_text3d");
 }
 
 export function installStatus(): Promise<InstallProgress> {

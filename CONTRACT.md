@@ -66,7 +66,7 @@ interface Asset {
   description: string;
   tags: string[];
   backend: Backend;
-  source: "openai" | "manual";
+  source: "openai" | "manual" | "text"; // "text" = native text-to-3D (mv2, no image)
   createdAt: string;        // disk: created_at
 }
 
@@ -111,6 +111,15 @@ interface Gen3d {
   stepsV21: number; stepsMv2: number; faceCountV21: number;
 }
 
+interface DecimateParams {     // on-demand mesh reduction (config "decimate")
+  targetFaceNum: number;
+  mode: "auto" | "preserve" | "rebake";  // auto = candidate pool, best Hausdorff wins
+  qualityThr: number; boundaryWeight: number;
+  preserveBoundary: boolean; preserveNormal: boolean;
+  optimalPlacement: boolean; planarQuadric: boolean;
+  bakeNormalMap: boolean; normalMapResolution: number;  // 1024 | 2048
+}
+
 interface ConfigPublic {       // what get_config returns (no raw key)
   openaiModel: string; openaiQuality: string; openaiTimeout: number;
   estimatedCostPerImage: number; budgetUsd: number;
@@ -134,11 +143,14 @@ interface ConfigPatch {        // update_config input, all optional
 | `list_projects` | – | `string[]` | dirs in workspace with project.json |
 | `create_project` | `{ name }` | `Project` | slugify name; idempotent |
 | `get_project` | `{ name }` | `ProjectBundle` | 404→Err |
-| `create_asset` | `{ project, name, description, tags, backend }` | `Asset` | unique id via slugify |
+| `create_asset` | `{ project, name, description, tags, backend, kind?, source? }` | `Asset` | unique id via slugify. `source:"text"` → native text-to-3D (forces `kind:"model"`, `backend:"mv2"`). |
+| `install_text3d` | `–` | `InstallProgress` | optional add-on: download HunyuanDiT into the HF cache + set `hunyuan.mv2.text3d_enabled`. Needs mv2 installed. |
 | `delete_asset` | `{ project, assetId }` | – | also rm asset dir |
 | `upload_source` | `{ project, assetId, bytes:number[] }` | `{ source:"manual" }` | normalize→source.png; set asset.source=manual |
 | `reset_asset` | `{ project, assetId }` | – | running/queued/error → pending |
 | `generate` | `{ project, assetId, stages }` | `JobSnapshot["current"]` | enqueue; marks stages queued |
+| `set_asset_decimate` | `{ project, assetId, decimate: Partial<DecimateParams> }` | – | per-asset override (snake_case on disk); empty = clear |
+| `decimate_model` | `{ project, assetId, params?: Partial<DecimateParams> }` | `DecimateResult` | direct call (NOT a queue job): re-reduce `model_raw.glb`→`model.glb` via worker `/decimate`. Refused while model3d/export/decimate is queued/running; per-asset lock. Persists result under the `"decimate"` stage key in state.json (not a pipeline stage) and resets `export` to pending. |
 | `get_config` | – | `ConfigPublic` | |
 | `update_config` | `{ patch: ConfigPatch }` | `ConfigPublic` | deep-merge gen3d |
 | `server_status` | – | `ServerStatus` | |
@@ -170,7 +182,8 @@ Rust picks a free port and passes it; worker also accepts `--port`. Rust waits f
 | endpoint | body | returns | does |
 |---|---|---|---|
 | `GET /health` | – | `{ ok: true }` | readiness |
-| `POST /gen3d` | `{ backend:"v21"\|"mv2", baseUrl, seed, gen3d:Gen3d, dest, imagePath?, viewDir? }` | `{ faces?, textures?, reduced, backend, seed, output, note? }` | v21: base64 POST `{baseUrl}/generate`; mv2: gradio_client `/generation_all` on `{baseUrl}`. Then mesh-reduce (pymeshlab/trimesh) to `dest`. On reduce failure, copy raw glb and set `reduced:false,note`. |
+| `POST /gen3d` | `{ backend:"v21"\|"mv2", baseUrl, seed, gen3d:Gen3d, dest, imagePath?, viewDir?, rawDest?, caption? }` | `{ faces?, textures?, reduced, backend, seed, output, rawOutput?, rawBytes?, note? }` | v21: base64 POST `{baseUrl}/generate`; mv2: gradio_client on `{baseUrl}`. **Inputs (mv2):** `viewDir` (4 views) OR `caption` (native text-to-3D — HunyuanDiT, needs the mv2 server launched with `--enable_t23d`; v21 rejects `caption`). **Texture:** `gen3d.texture=false` → mv2 calls `/shape_generation` (geometry only) instead of `/generation_all`, and the reduction is geometry-only. When `rawDest` is set, the untouched raw GLB is persisted there first. Then mesh-reduce (pymeshlab/trimesh) to `dest`. On reduce failure, copy raw glb and set `reduced:false,note`. |
+| `POST /decimate` | `{ raw, dest, params: DecimateParams }` | `{ facesBefore, facesAfter, verticesBefore, verticesAfter, fileSizeBefore, fileSizeAfter, fidelity, hausdorffRmsPct, hausdorffMaxPct, baked, normalMapResolution, uvOverlapPct, method, paramsUsed, candidatesTried, output, note? }` | Re-decimate the raw GLB. `mode:"auto"` runs a candidate pool (texture-preserving variants, free-decimation + xatlas re-unwrap + albedo re-bake, meshoptimizer) and keeps the best one-sided Hausdorff fidelity (reduced→raw, % of bbox diag). `bakeNormalMap`: bakes the raw mesh's normals into a glTF tangent-space normal map laid out in the reduced mesh's atlas (skipped with a `note` when UV overlap > 1%). |
 | `POST /export` | `{ glb, dest }` | `{ faces, textured }` | trimesh GLB→OBJ(+mtl+texture) in dest's own dir. |
 
 Worker errors: respond with HTTP 4xx/5xx and JSON `{ detail: "<message>" }`; Rust
@@ -186,9 +199,15 @@ surfaces `detail` into the stage `error`.
   payload keys EXACTLY: image(b64), remove_background, texture, seed, octree_resolution,
   num_inference_steps(=stepsV21), guidance_scale, num_chunks, face_count(=faceCountV21),
   type:"glb"; `generate_mv2` gradio arg ORDER EXACTLY:
-  `(None, None, front, back, left, right, stepsMv2, guidanceScale, seed, octreeResolution, True, numChunks, False)` api_name `/generation_all`, result `[1]` is the glb path.
-- `mesh.py`: `finalize_glb` → `reduce_textured_glb` (pymeshlab quadric edge-collapse
-  with texture, wedge UV corner-duplication for trimesh export); fallback = copy raw.
+  `(caption, None, front, back, left, right, stepsMv2, guidanceScale, seed, octreeResolution, True, numChunks, False)`.
+  `caption` (text-to-3D) and the 4 views are mutually exclusive (views are `None`
+  in text mode). api_name = `/generation_all` when textured, `/shape_generation`
+  when `texture=false`; the mesh path is extracted from the result robustly
+  (different tuple positions per endpoint).
+- `mesh.py`: `finalize_glb(texture)` → `reduce_textured_glb` (pymeshlab quadric
+  edge-collapse with texture, wedge UV corner-duplication for trimesh export) when
+  textured, else `reduce_untextured_glb` (geometry-only quadric collapse, no UV);
+  fallback = copy raw.
 - `export_obj.py`: `export_one`.
 
 ## Stage pipeline orchestration (Rust `jobs`)

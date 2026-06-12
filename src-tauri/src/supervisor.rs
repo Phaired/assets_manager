@@ -20,6 +20,10 @@ use crate::types::ServerStatus;
 
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+/// Suppress the console window of the spawned Hunyuan/gradio server — without
+/// it the packaged app pops a terminal. Stop is child.kill(), console-free.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn base_url(backend: &str, cfg: &Value) -> Option<String> {
     let h = cfg.get("hunyuan")?.get(backend)?;
@@ -126,6 +130,19 @@ fn command_for(backend: &str, cfg: &Value) -> AppResult<(Command, PathBuf)> {
             }
         }
     }
+    // Native text-to-3D (HunyuanDiT): opt-in flag set by the optional install
+    // step. Loading the t2i model costs extra VRAM, so it's only enabled once the
+    // user has installed it. Guard against a double flag if it's also in extra_args.
+    if backend == "mv2"
+        && h.get("text3d_enabled").and_then(|x| x.as_bool()).unwrap_or(false)
+        && !h
+            .get("extra_args")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().any(|v| v.as_str() == Some("--enable_t23d")))
+            .unwrap_or(false)
+    {
+        cmd.arg("--enable_t23d");
+    }
     // Point the server at the centralised HuggingFace cache the guided installer
     // filled, so weights are read from the same single folder (not ~/.cache).
     if let Some(hf) = h.get("hf_home").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
@@ -146,6 +163,11 @@ struct Inner {
 pub struct Supervisor {
     config: Arc<Config>,
     inner: Mutex<Inner>,
+    /// Exclusive-GPU gate. Held for the whole duration of a standalone GPU op (the
+    /// paint pass). `ensure()` acquires-and-releases it so a queued model3d job
+    /// BLOCKS here instead of restarting gradio mid-paint (which would OOM on a
+    /// single GPU).
+    gpu: Mutex<()>,
 }
 
 impl Supervisor {
@@ -159,7 +181,32 @@ impl Supervisor {
                 log_path: None,
                 error: None,
             }),
+            gpu: Mutex::new(()),
         }
+    }
+
+    /// Acquire the exclusive-GPU gate for the duration of a standalone op (paint).
+    /// While held, `ensure()` (the job runner) blocks before touching the server.
+    pub fn acquire_gpu(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.gpu.lock()
+    }
+
+    /// Stop the managed server AND verify no backend answers a health probe. An
+    /// adopted / externally-started server isn't `proc`-owned, so `stop()` alone
+    /// can't kill it — we probe to confirm the GPU is truly free before painting.
+    pub fn ensure_gpu_free(&self, tries: u32) -> AppResult<()> {
+        self.stop();
+        let cfg = self.config.load();
+        for _ in 0..tries {
+            if !probe("v21", &cfg, 2) && !probe("mv2", &cfg, 2) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        Err(AppError::msg(
+            "un serveur Hunyuan tourne encore (démarré hors de l'app ?) — arrête-le \
+             manuellement avant de texturer (le GPU doit être libre).",
+        ))
     }
 
     fn tail(&self, log_path: &Option<PathBuf>, lines: usize) -> String {
@@ -245,13 +292,19 @@ impl Supervisor {
             .open(&log_path)?;
         let log_err = log_file.try_clone()?;
 
-        let (mut cmd, _dir) = command_for(backend, &cfg)?;
+        let (mut cmd, dir) = command_for(backend, &cfg)?;
+        // Refresh the bundled Python overlay before each launch so the backend
+        // scripts always match this app version, even after an app update with
+        // no backend reinstall. No-op for custom (non app-managed) dirs.
+        if let Err(e) = crate::installer::apply_overlay(backend, &dir) {
+            eprintln!("overlay {backend} ignoré: {e}");
+        }
         cmd.stdout(std::process::Stdio::from(log_file))
             .stderr(std::process::Stdio::from(log_err));
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
         }
         let child = cmd
             .spawn()
@@ -314,10 +367,7 @@ impl Supervisor {
     pub fn stop(&self) {
         let mut guard = self.inner.lock();
         if let Some(mut child) = guard.proc.take() {
-            if matches!(child.try_wait(), Ok(None)) {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+            crate::proc::kill_child_tree(&mut child);
         }
         guard.status = "stopped".into();
         guard.backend = None;
@@ -343,6 +393,9 @@ impl Supervisor {
 
     /// Ensure `backend` is healthy; start if needed. Returns base_url.
     pub fn ensure(self: &Arc<Self>, backend: &str, timeout_secs: u64) -> AppResult<String> {
+        // Block while a standalone GPU op (paint) holds the GPU, so we never
+        // restart gradio mid-paint. The serial job runner is the only contender.
+        let _gpu = self.gpu.lock();
         let cfg = self.config.load();
         if probe(backend, &cfg, 3) {
             let mut guard = self.inner.lock();

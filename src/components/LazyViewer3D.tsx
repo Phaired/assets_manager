@@ -10,7 +10,11 @@ const Viewer3D = lazy(() =>
   import("./Viewer3D").then((m) => ({ default: m.Viewer3D })),
 );
 
-function ViewerFallback({ height }: { height: number }) {
+const CompareViewer3D = lazy(() =>
+  import("./CompareViewer3D").then((m) => ({ default: m.CompareViewer3D })),
+);
+
+function ViewerFallback({ height }: { height: number | string }) {
   return (
     <div
       className="viewer3d viewer3d-loading"
@@ -33,12 +37,42 @@ export function LazyViewer3D({
   name,
 }: {
   src: string | null;
-  height?: number;
+  /** Pixel height, or a CSS size ("100%" to fill a sized parent). */
+  height?: number | string;
   name?: string;
 }) {
   return (
     <Suspense fallback={<ViewerFallback height={height} />}>
       <Viewer3D src={src} height={height} name={name} />
+    </Suspense>
+  );
+}
+
+/** Lazy wrapper around the raw-vs-reduced synced comparison viewer. */
+export function LazyCompareViewer3D({
+  rawSrc,
+  reducedSrc,
+  height = 400,
+  meta,
+}: {
+  rawSrc: string;
+  reducedSrc: string;
+  /** Pixel height of the panes, or "100%" to fill a sized parent. */
+  height?: number | string;
+  meta?: {
+    fidelity?: number;
+    fileSizeBefore?: number;
+    fileSizeAfter?: number;
+  };
+}) {
+  return (
+    <Suspense fallback={<ViewerFallback height={height} />}>
+      <CompareViewer3D
+        rawSrc={rawSrc}
+        reducedSrc={reducedSrc}
+        height={height}
+        meta={meta}
+      />
     </Suspense>
   );
 }

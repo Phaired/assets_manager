@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
+import type { LucideIcon } from "lucide-react";
 import {
   Plus,
   Search,
   ArrowUpDown,
   Image as ImageIcon,
+  Boxes,
   Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -23,6 +25,7 @@ import { ProjectDnaPanel } from "./ProjectDnaPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Separator } from "@/components/ui/separator";
 import {
   Select,
   SelectContent,
@@ -57,7 +60,7 @@ function stageStatus(
 
 /** Sort rank by aggregate status: active first, then errors, partial, done, idle. */
 function statusRank(bundle: ProjectBundle | null, asset: Asset): number {
-  const statuses = stagesForKind(asset.kind).map((s) =>
+  const statuses = stagesForKind(asset.kind, asset.source).map((s) =>
     stageStatus(bundle, asset.id, s),
   );
   if (statuses.some((s) => s === "running" || s === "queued")) return 0;
@@ -75,12 +78,14 @@ function AssetThumb({
   rel,
   ready,
   version,
+  fallbackIcon: Fallback = ImageIcon,
 }: {
   project: string;
   assetId: string;
   rel: string;
   ready: boolean;
   version: string;
+  fallbackIcon?: LucideIcon;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
@@ -106,7 +111,7 @@ function AssetThumb({
       {url ? (
         <img src={url} alt="" className="size-full object-cover" />
       ) : (
-        <ImageIcon size={12} className="text-muted-foreground/50" aria-hidden />
+        <Fallback size={12} className="text-muted-foreground/50" aria-hidden />
       )}
     </span>
   );
@@ -134,7 +139,7 @@ export function Assets3dSidebar({
   const pendingAssets = useMemo(
     () =>
       assets.filter((a) =>
-        stagesForKind(a.kind).some(
+        stagesForKind(a.kind, a.source).some(
           (s) => stageStatus(bundle, a.id, s) !== "done",
         ),
       ),
@@ -146,7 +151,7 @@ export function Assets3dSidebar({
   function generateAllPending() {
     let count = 0;
     for (const a of pendingAssets) {
-      const stages = stagesForKind(a.kind).filter(
+      const stages = stagesForKind(a.kind, a.source).filter(
         (s) => stageStatus(bundle, a.id, s) !== "done",
       );
       if (!stages.length) continue;
@@ -192,37 +197,37 @@ export function Assets3dSidebar({
 
   return (
     <>
-      <div className="flex items-center gap-2">
-        <Button
-          size="sm"
-          className="flex-1"
-          disabled={!project}
-          onClick={() => setAssetId(null)}
-          title="Créer un nouvel asset"
-        >
-          <Plus size={14} /> Nouvel asset
-        </Button>
-        {pendingAssets.length > 0 && (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={generateAllPending}
-            disabled={generate.isPending}
-            title="Lance les étapes manquantes de tous les assets non terminés"
-          >
-            <Wand2 size={14} /> Tout ({pendingAssets.length})
-          </Button>
-        )}
-      </div>
+      <Button
+        size="sm"
+        className="w-full"
+        disabled={!project}
+        onClick={() => setAssetId(null)}
+        title="Créer un nouvel asset"
+      >
+        <Plus size={14} /> Nouvel asset
+      </Button>
 
       <div className="flex min-h-0 grow flex-col gap-2">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <span className="text-sm font-medium text-muted-foreground">Assets</span>
-          <span className="text-xs text-muted-foreground">
-            {needle || activeTags.length || kindFilter
-              ? `${visible.length}/${assets.length}`
-              : assets.length}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {needle || activeTags.length || kindFilter
+                ? `${visible.length}/${assets.length}`
+                : assets.length}
+            </span>
+            {pendingAssets.length > 0 && (
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={generateAllPending}
+                disabled={generate.isPending}
+                title="Lance les étapes manquantes de tous les assets non terminés"
+              >
+                <Wand2 size={13} /> Tout ({pendingAssets.length})
+              </Button>
+            )}
+          </div>
         </div>
 
         {assets.length > 1 && (
@@ -335,6 +340,7 @@ export function Assets3dSidebar({
           {visible.map((a) => {
             const active = a.id === assetId;
             const isTexture = a.kind === "texture";
+            const isText = a.source === "text";
             const thumbStage = isTexture ? "texture" : "multiview";
             const thumbDone = stageStatus(bundle, a.id, thumbStage) === "done";
             const thumbVer =
@@ -362,10 +368,11 @@ export function Assets3dSidebar({
                   rel={isTexture ? "texture.png" : "multiview/front.png"}
                   ready={thumbDone}
                   version={String(thumbVer)}
+                  fallbackIcon={isText ? Boxes : undefined}
                 />
                 <span className="min-w-0 flex-1 truncate">{a.name}</span>
                 <span className="flex shrink-0 items-center gap-1" aria-hidden>
-                  {stageDefsForKind(a.kind).map((s) => {
+                  {stageDefsForKind(a.kind, a.source).map((s) => {
                     const status = stageStatus(bundle, a.id, s.key);
                     return (
                       <span
@@ -383,10 +390,16 @@ export function Assets3dSidebar({
       </div>
 
       {project && bundle && (
-        <div className="flex flex-col gap-1.5">
-          <PackIdeationDialog project={project} />
-          <ProjectDnaPanel projectName={project} project={bundle.project} />
-        </div>
+        <>
+          <Separator />
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Projet
+            </span>
+            <PackIdeationDialog project={project} />
+            <ProjectDnaPanel projectName={project} project={bundle.project} />
+          </div>
+        </>
       )}
     </>
   );

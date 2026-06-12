@@ -13,6 +13,7 @@ mod jobs;
 mod openai;
 mod openai_admin;
 mod openai_text;
+mod proc;
 mod store;
 mod supervisor;
 mod types;
@@ -79,6 +80,8 @@ pub fn run() {
         .manage(Arc::clone(&jobs))
         .manage(Arc::clone(&elevenlabs))
         .manage(Arc::clone(&audio_jobs))
+        .manage(Arc::new(commands::DecimateLocks::default()))
+        .manage(Arc::new(commands::Paint3dLocks::default()))
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -155,6 +158,9 @@ pub fn run() {
             commands::duplicate_asset,
             commands::delete_asset,
             commands::set_asset_gen3d,
+            commands::set_asset_decimate,
+            commands::decimate_model,
+            commands::paint_model,
             commands::upload_source,
             commands::reset_asset,
             commands::edit_image,
@@ -169,6 +175,7 @@ pub fn run() {
             commands::server_start,
             commands::server_stop,
             commands::install_backend,
+            commands::install_text3d,
             commands::install_status,
             commands::cancel_install,
             commands::asset_file_src,

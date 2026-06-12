@@ -13,27 +13,40 @@ export function TexturePreview({
   project,
   assetId,
   version,
+  fill = false,
 }: {
   project: string;
   assetId: string;
   version: string;
+  /** Fill the parent's height instead of the fixed 420px preview. */
+  fill?: boolean;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [tiling, setTiling] = useState(true);
   // Tile size in px when tiling (smaller = more repetitions visible).
   const [scale, setScale] = useState(128);
 
+  // Load the texture into a blob object URL and use that for both the <img> and
+  // the CSS background. WebView2 happily loads the asset:// protocol in an <img>
+  // src, but does NOT reliably load it via CSS `background-image: url(...)`, so
+  // tiling stayed blank. A blob: URL works everywhere and avoids a re-fetch.
   useEffect(() => {
     let active = true;
+    let objectUrl: string | null = null;
     assetFileUrl(project, assetId, "texture.png")
-      .then((u) => {
-        if (active) setUrl(`${u}?t=${encodeURIComponent(version)}`);
+      .then((u) => fetch(`${u}?t=${encodeURIComponent(version)}`))
+      .then((r) => r.blob())
+      .then((blob) => {
+        if (!active) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
       })
       .catch(() => {
         if (active) setUrl(null);
       });
     return () => {
       active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [project, assetId, version]);
 
@@ -51,9 +64,12 @@ export function TexturePreview({
   if (!url) return null;
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className={cn("flex flex-col gap-3", fill && "absolute inset-0")}>
       <div
-        className="h-[420px] w-full overflow-hidden rounded-lg border border-border bg-muted"
+        className={cn(
+          "w-full overflow-hidden rounded-lg border border-border bg-muted",
+          fill ? "min-h-0 flex-1" : "h-[420px]",
+        )}
         style={
           tiling
             ? {

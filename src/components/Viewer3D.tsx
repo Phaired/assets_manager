@@ -27,15 +27,11 @@ import { save } from "@tauri-apps/plugin-dialog";
 import type { ComponentRef } from "react";
 
 import { saveRender } from "../lib/api";
+import { collectMeshStats, type MeshStats } from "../lib/meshStats";
 
 type OrbitControlsImpl = ComponentRef<typeof OrbitControls>;
 
-export interface MeshStats {
-  faces: number;
-  vertices: number;
-  /** Model bounding-box size (world units) — for the dimensions readout. */
-  size: { x: number; y: number; z: number };
-}
+export type { MeshStats };
 
 /** Local lighting presets (no remote HDR — keeps the viewer offline-safe). Each
  *  is scaled by the brightness slider on top. */
@@ -64,31 +60,9 @@ function Model({
   const gltf = useGLTF(url);
 
   const { scene, box, stats } = useMemo(() => {
-    let faces = 0;
-    let vertices = 0;
     const cloned = gltf.scene.clone(true);
-    cloned.traverse((obj) => {
-      const mesh = obj as THREE.Mesh;
-      if (mesh.isMesh && mesh.geometry) {
-        const g = mesh.geometry as THREE.BufferGeometry;
-        const pos = g.getAttribute("position");
-        if (pos) vertices += pos.count;
-        if (g.index) faces += g.index.count / 3;
-        else if (pos) faces += pos.count / 3;
-      }
-    });
-    const box = new THREE.Box3().setFromObject(cloned);
-    const size = new THREE.Vector3();
-    box.getSize(size);
-    return {
-      scene: cloned,
-      box,
-      stats: {
-        faces: Math.round(faces),
-        vertices,
-        size: { x: size.x, y: size.y, z: size.z },
-      },
-    };
+    const { stats, box } = collectMeshStats(cloned);
+    return { scene: cloned, box, stats };
   }, [gltf.scene]);
 
   // Apply wireframe + emissive (the texture lights itself a bit so shadow sides
@@ -176,7 +150,8 @@ export function Viewer3D({
   name = "render",
 }: {
   src: string | null;
-  height?: number;
+  /** Pixel height, or a CSS size ("100%" to fill a sized parent). */
+  height?: number | string;
   /** Base filename suggested in the screenshot save dialog. */
   name?: string;
 }) {

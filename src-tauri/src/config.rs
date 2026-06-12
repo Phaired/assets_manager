@@ -157,6 +157,25 @@ fn render_subject_style(template: &str, name: &str, description: &str, style: &s
         .replace("{style}", style.trim())
 }
 
+/// Plain caption for native text-to-3D (HunyuanDiT t2i, mv2 backend). Unlike the
+/// multiview template this is a bare "subject. style" sentence — no turnaround
+/// sheet scaffolding (the t2i model wants a single clean prompt).
+pub fn render_text3d_caption(name: &str, description: &str, style: &str) -> String {
+    let subject = if !description.trim().is_empty() {
+        description.trim()
+    } else if !name.trim().is_empty() {
+        name.trim()
+    } else {
+        "an original stylized game asset"
+    };
+    let style = style.trim();
+    if style.is_empty() {
+        subject.to_string()
+    } else {
+        format!("{subject}. {style}")
+    }
+}
+
 /// Identical to the original Python `DEFAULTS` (workspace/Hunyuan paths resolved
 /// at runtime — see `data_root` and `hunyuan_default`).
 pub fn defaults() -> Value {
@@ -201,15 +220,30 @@ pub fn defaults() -> Value {
             "music_model": "music_v1",
             "output_format": "mp3_44100_128"
         },
+        // steps_mv2=20 / octree=192: quality-verified fast defaults (mv2 mesh
+        // quality cliffs below ~15 steps; 20 is visually identical to 50 after
+        // decimation while cutting shape diffusion 2.5x).
         "gen3d": {
             "target_face_num": 20000,
-            "octree_resolution": 256,
+            "octree_resolution": 192,
             "num_chunks": 200000,
             "guidance_scale": 7.5,
             "texture": true,
             "steps_v21": 30,
-            "steps_mv2": 50,
+            "steps_mv2": 20,
             "face_count_v21": 40000
+        },
+        "decimate": {
+            "target_face_num": 20000,
+            "mode": "auto",
+            "quality_thr": 1.0,
+            "boundary_weight": 3.0,
+            "preserve_boundary": true,
+            "preserve_normal": true,
+            "optimal_placement": true,
+            "planar_quadric": false,
+            "bake_normal_map": true,
+            "normal_map_resolution": 1024
         },
         "hunyuan": {
             "v21": {
@@ -231,7 +265,11 @@ pub fn defaults() -> Value {
                 "model_path": "tencent/Hunyuan3D-2mv",
                 "subfolder": "hunyuan3d-dit-v2-mv",
                 "texgen_model_path": "tencent/Hunyuan3D-2",
-                "extra_args": ["--low_vram_mode", "--enable_flashvdm"]
+                "extra_args": ["--low_vram_mode", "--enable_flashvdm"],
+                // Native text-to-3D opt-in. Set true by the optional install_text3d
+                // step (downloads HunyuanDiT); makes the supervisor launch the mv2
+                // server with --enable_t23d.
+                "text3d_enabled": false
             }
         }
     })

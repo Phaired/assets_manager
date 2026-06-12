@@ -276,6 +276,21 @@ impl Runner {
             return Ok(());
         }
 
+        // Native text-to-3D: no image stage at all — the prompt goes straight to
+        // HunyuanDiT inside the mv2 server (see stage_model3d). Mark multiview as a
+        // no-op so the pipeline can proceed to model3d.
+        if source == "text" {
+            self.store.update_stage(
+                project,
+                asset_id,
+                "multiview",
+                "done",
+                None,
+                Some(json!({"source": "text"})),
+            )?;
+            return Ok(());
+        }
+
         let api_key = crate::config::openai_key(cfg);
         if api_key.is_empty() {
             return Err(AppError::msg("OPENAI_API_KEY absent (Reglages ou .env)"));
@@ -431,7 +446,14 @@ impl Runner {
     fn stage_model3d(&self, cfg: &Value, project: &str, asset: &Value) -> AppResult<()> {
         let asset_id = asset.get("id").and_then(|x| x.as_str()).unwrap_or("");
         let asset_backend = asset.get("backend").and_then(|x| x.as_str()).unwrap_or("auto");
-        let backend = self.supervisor.resolve_backend(asset_backend);
+        let source = asset.get("source").and_then(|x| x.as_str()).unwrap_or("");
+        // Native text-to-3D forces mv2 (only backend with HunyuanDiT / --enable_t23d).
+        let text_mode = source == "text";
+        let backend = if text_mode {
+            "mv2".to_string()
+        } else {
+            self.supervisor.resolve_backend(asset_backend)
+        };
         // Per-asset seed override if set, else a deterministic seed from the id.
         let seed = asset
             .get("seed")
@@ -447,9 +469,26 @@ impl Runner {
         };
         let gen3d = Gen3d::from_config(&gen3d_merged);
         let dest = self.store.model_path(project, asset_id)?;
+        let raw_dest = self.store.model_raw_path(project, asset_id)?;
         let base_url = self.supervisor.ensure(&backend, 900)?;
 
-        let (image_path, view_dir) = if backend == "v21" {
+        // Resolve the geometry input: a text caption (text-to-3D), a single image
+        // (v21), or the 4 multiview files (mv2).
+        let (image_path, view_dir, caption) = if text_mode {
+            let name = asset.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            let description = asset.get("description").and_then(|x| x.as_str()).unwrap_or("");
+            let style = self.store.project_style_block(project).unwrap_or_default();
+            let caption = match asset
+                .get("prompt_override")
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(p) => p.to_string(),
+                None => crate::config::render_text3d_caption(name, description, &style),
+            };
+            (None, None, Some(caption))
+        } else if backend == "v21" {
             // single image: manual source if present, else multiview/front.png
             let source = self.store.source_image_path(project, asset_id)?;
             let chosen = if source.is_file() {
@@ -462,7 +501,7 @@ impl Runner {
                     "aucune image d'entree (multivue ou source) pour le backend v21",
                 ));
             }
-            (Some(chosen.to_string_lossy().to_string()), None)
+            (Some(chosen.to_string_lossy().to_string()), None, None)
         } else {
             // mv2: require all 4 view files
             let missing = self.store.missing_views(project, asset_id)?;
@@ -472,7 +511,7 @@ impl Runner {
                 )));
             }
             let view_dir = self.store.multiview_dir(project, asset_id)?;
-            (None, Some(view_dir.to_string_lossy().to_string()))
+            (None, Some(view_dir.to_string_lossy().to_string()), None)
         };
 
         let meta = self.worker.gen3d(
@@ -483,7 +522,29 @@ impl Runner {
             &dest.to_string_lossy(),
             image_path.as_deref(),
             view_dir.as_deref(),
+            Some(&raw_dest.to_string_lossy()),
+            caption.as_deref(),
         )?;
+
+        // Persist the background-removed reference the patched gradio saved (fixed
+        // path in the mv2 backend dir) so the standalone paint pass can texture this
+        // mesh later without HunyuanDiT in VRAM. Best-effort; mv2 only.
+        if backend == "mv2" {
+            if let Some(dir) = cfg
+                .get("hunyuan")
+                .and_then(|h| h.get("mv2"))
+                .and_then(|m| m.get("dir"))
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                let src = std::path::Path::new(dir).join("assets_gen_last_ref.png");
+                if src.is_file() {
+                    if let Ok(ref_dest) = self.store.paint_ref_path(project, asset_id) {
+                        let _ = std::fs::copy(&src, &ref_dest);
+                    }
+                }
+            }
+        }
 
         // Augment meta with backend/seed/output (worker also returns some of these;
         // we ensure they are present to match the Python contract).

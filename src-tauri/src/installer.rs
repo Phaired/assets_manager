@@ -322,6 +322,161 @@ impl Installer {
         Ok(self.status())
     }
 
+    /// Optional add-on: download the native text-to-image model (HunyuanDiT) into
+    /// the centralised HF cache and flip `hunyuan.mv2.text3d_enabled`, so the mv2
+    /// server launches with `--enable_t23d` (native offline text-to-3D). The mv2
+    /// backend must already be installed (we reuse its venv python). Background
+    /// thread, same progress/cancel plumbing as `start`.
+    pub fn install_text3d(
+        self: &Arc<Self>,
+        app: AppHandle,
+        supervisor: Arc<Supervisor>,
+    ) -> AppResult<InstallProgress> {
+        {
+            let mut g = self.inner.lock();
+            if g.running {
+                return Err(AppError::msg(
+                    "une installation est déjà en cours — patiente ou annule-la d'abord.",
+                ));
+            }
+            g.running = true;
+            g.cancel = false;
+            g.done = false;
+            g.error = None;
+            g.backend = Some("text3d".to_string());
+            g.phase = "weights".into();
+            g.pct = 0;
+            g.message = "Préparation du text-to-3D…".into();
+            g.child = None;
+            g.log_path = None;
+        }
+        let me = Arc::clone(self);
+        std::thread::spawn(move || {
+            let result = me.run_text3d(&app, &supervisor);
+            let mut g = me.inner.lock();
+            g.running = false;
+            g.child = None;
+            match result {
+                Ok(()) => {
+                    g.done = true;
+                    g.phase = "done".into();
+                    g.pct = 100;
+                    g.message = "Text-to-3D activé — relance une génération.".into();
+                    g.error = None;
+                }
+                Err(e) => {
+                    g.done = false;
+                    g.error = Some(e.to_string());
+                    g.message = e.to_string();
+                }
+            }
+            let snapshot = InstallProgress {
+                backend: g.backend.clone(),
+                running: false,
+                phase: g.phase.clone(),
+                pct: g.pct,
+                message: g.message.clone(),
+                log_tail: tail_file(&g.log_path, 40),
+                done: g.done,
+                error: g.error.clone(),
+            };
+            drop(g);
+            events::emit_install_progress(&app, &snapshot);
+        });
+        Ok(self.status())
+    }
+
+    fn run_text3d(self: &Arc<Self>, app: &AppHandle, supervisor: &Arc<Supervisor>) -> AppResult<()> {
+        // The download must land in the SAME centralised HF cache the mv2 server
+        // reads from (run() sets HF_HOME from inner.root).
+        let root = runtime_root();
+        std::fs::create_dir_all(&root)?;
+        self.inner.lock().root = Some(root.clone());
+        let log_path = config::logs_dir()?.join("install_text3d.log");
+        self.inner.lock().log_path = Some(log_path.clone());
+
+        // Reuse the mv2 backend's venv python (it has huggingface_hub installed).
+        let cfg = self.config.load();
+        let python = cfg
+            .get("hunyuan")
+            .and_then(|h| h.get("mv2"))
+            .and_then(|m| m.get("python"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if python.trim().is_empty() || !PathBuf::from(&python).is_file() {
+            return Err(AppError::msg(
+                "Installe d'abord le backend 3D (mv2) avant d'activer le text-to-3D.",
+            ));
+        }
+
+        // HunyuanDiT's T5 text encoder needs sentencepiece (+ protobuf); neither
+        // is in the base Hunyuan requirements, so the server would crash on launch
+        // with --enable_t23d ("T5Tokenizer requires the SentencePiece library").
+        self.phase(app, "deps", 4, "Installation des dépendances text-to-3D…");
+        let uv = uv_exe();
+        let mut c = Command::new(&uv);
+        c.arg("pip")
+            .arg("install")
+            .arg("--python")
+            .arg(&python)
+            .arg("sentencepiece")
+            .arg("protobuf");
+        self.run(app, c, &log_path)?;
+
+        self.phase(
+            app,
+            "weights",
+            10,
+            "Téléchargement du modèle text-to-image (HunyuanDiT, ~8 Go)…",
+        );
+        let code = "from huggingface_hub import snapshot_download; \
+             snapshot_download(repo_id='Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled', \
+             max_workers=4); print('OK text2image')";
+        let mut c = Command::new(&python);
+        c.arg("-c").arg(code);
+        self.run(app, c, &log_path)?;
+
+        // Flip the opt-in flag so the supervisor adds --enable_t23d on next launch.
+        self.phase(app, "config", 92, "Activation du text-to-3D…");
+        let over = json!({ "hunyuan": { "mv2": { "text3d_enabled": true } } });
+        let merged = config::deep_merge(&self.config.load(), &over);
+        self.config.save(&merged)?;
+
+        // Patch the multiview gradio so a caption with no views synthesizes one
+        // front view via HunyuanDiT — without this the MV model rejects caption-
+        // only requests ("Please provide at least one view image").
+        if let Some(dir) = cfg
+            .get("hunyuan")
+            .and_then(|h| h.get("mv2"))
+            .and_then(|m| m.get("dir"))
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            // Refresh the bundled overlay first (no-op for custom dirs), then the
+            // idempotent string patches as fallback. The t2i VRAM-offload patch
+            // matters most right here: without it the freshly enabled
+            // --enable_t23d keeps HunyuanDiT resident in VRAM and slows EVERY
+            // image→3D generation ~3x (paging on 16 GB cards).
+            if let Err(e) = apply_overlay("mv2", &PathBuf::from(dir)) {
+                self.log_line(&log_path, &format!("overlay Python ignoré: {e}"));
+            }
+            let gradio = PathBuf::from(dir).join("gradio_app.py");
+            if let Err(e) = patch_gradio_t23d(&gradio) {
+                self.log_line(&log_path, &format!("patch gradio t23d ignoré: {e}"));
+            }
+            if let Err(e) = patch_mv2_perf(&PathBuf::from(dir)) {
+                self.log_line(&log_path, &format!("patchs perf mv2 ignorés: {e}"));
+            }
+        }
+
+        // Stop the mv2 server (if running) so the next generation relaunches it
+        // WITH --enable_t23d — start() would otherwise reuse the healthy old one.
+        self.phase(app, "start", 95, "Application du flag (redémarrage requis)…");
+        supervisor.stop();
+        Ok(())
+    }
+
     // --- pipeline ---------------------------------------------------------
 
     fn run_pipeline(
@@ -374,6 +529,22 @@ impl Installer {
             extract_zip_strip_top(&zip_path, &install_dir)?;
             let _ = std::fs::remove_file(&zip_path);
             mark_done(&markers, "code")?;
+        }
+        // Bundled overlay + performance patches — outside the marker guard and
+        // idempotent, so a resumed or repaired install (re)applies them too. The
+        // overlay copies the exact pre-patched scripts shipped with the app; the
+        // string patches stay as fallback when an overlay file is absent.
+        if backend == "mv2" {
+            match apply_overlay(backend, &install_dir) {
+                Ok(n) if n > 0 => {
+                    self.log_line(&log_path, &format!("overlay Python appliqué ({n} fichiers)"));
+                }
+                Ok(_) => {}
+                Err(e) => self.log_line(&log_path, &format!("overlay Python ignoré: {e}")),
+            }
+            if let Err(e) = patch_mv2_perf(&install_dir) {
+                self.log_line(&log_path, &format!("patchs perf mv2 ignorés: {e}"));
+            }
         }
         self.check_cancel()?;
 
@@ -848,6 +1019,177 @@ impl Installer {
 // ===========================================================================
 // free helpers
 // ===========================================================================
+
+/// Best-effort, idempotent patch of the Hunyuan3D-2mv gradio so a text caption
+/// with no view images synthesizes a single front view via HunyuanDiT (text-to-3D).
+/// The multiview model otherwise rejects caption-only requests. Silently no-ops if
+/// already patched or if the upstream block moved.
+fn patch_gradio_t23d(gradio: &Path) -> std::io::Result<()> {
+    let mut src = std::fs::read_to_string(gradio)?;
+
+    // --- Patch 1: caption (no views) -> single front view via HunyuanDiT -------
+    const NEEDLE: &str = r#"    if MV_MODE:
+        if mv_image_front is None and mv_image_back is None and mv_image_left is None and mv_image_right is None:
+            raise gr.Error("Please provide at least one view image.")
+        image = {}
+        if mv_image_front:
+            image['front'] = mv_image_front
+        if mv_image_back:
+            image['back'] = mv_image_back
+        if mv_image_left:
+            image['left'] = mv_image_left
+        if mv_image_right:
+            image['right'] = mv_image_right"#;
+    const REPLACEMENT: &str = r#"    if MV_MODE:
+        if mv_image_front is None and mv_image_back is None and mv_image_left is None and mv_image_right is None:
+            # assets_gen patch: native offline text-to-3D. The multiview model
+            # normally requires view images, but if a caption is given with no
+            # views, synthesize a single front view with HunyuanDiT (--enable_t23d)
+            # and feed it as the only view. Additive — does not affect the normal
+            # multiview path.
+            if caption and ('t2i_worker' in globals()) and (t2i_worker is not None):
+                image = {'front': t2i_worker(caption)}
+            else:
+                raise gr.Error("Please provide at least one view image.")
+        else:
+            image = {}
+            if mv_image_front:
+                image['front'] = mv_image_front
+            if mv_image_back:
+                image['back'] = mv_image_back
+            if mv_image_left:
+                image['left'] = mv_image_left
+            if mv_image_right:
+                image['right'] = mv_image_right"#;
+    if !src.contains("assets_gen patch: native offline text-to-3D") && src.contains(NEEDLE) {
+        src = src.replacen(NEEDLE, REPLACEMENT, 1);
+        std::fs::write(gradio, &src)?;
+    }
+
+    // --- Patch 2: persist the rembg'd reference (main_image) to a fixed path ----
+    // The reference image (t2i image for text, front view otherwise) is never
+    // returned to the gradio_client, so we save it to a stable file in the backend
+    // dir. Generation is serial (single GPU), so a fixed path is race-free; Rust
+    // copies it to the asset's ref.png right after the gen. Enables the standalone
+    // paint pass (texture later without HunyuanDiT in VRAM).
+    const REF_NEEDLE: &str = "    main_image = image if not MV_MODE else image['front']";
+    const REF_REPLACEMENT: &str = r#"    main_image = image if not MV_MODE else image['front']
+    try:
+        # assets_gen patch: persist the rembg'd reference for the later paint pass.
+        main_image.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets_gen_last_ref.png'))
+    except Exception:
+        pass"#;
+    if !src.contains("assets_gen_last_ref.png") && src.contains(REF_NEEDLE) {
+        src = src.replacen(REF_NEEDLE, REF_REPLACEMENT, 1);
+        std::fs::write(gradio, &src)?;
+    }
+    Ok(())
+}
+
+/// Copy the bundled, pre-patched Python overlay
+/// (`<resource_root>/hunyuan_overlay/<backend>/**`) over the installed backend,
+/// so the scripts are exactly the ones this app version ships — applied at
+/// install AND at every server start (an app update refreshes them without a
+/// backend reinstall). The overlay files are derived from the SAME pinned
+/// zipball revision as `Recipe::repo_zip_url`; regenerate them if the pin moves
+/// (see hunyuan_overlay/README.md). Returns the number of files copied.
+///
+/// Guard: only applies when `dir` lives under `runtime_root()` (an
+/// app-managed install) — a custom `hunyuan.<backend>.dir` (e.g. a dev clone)
+/// is never overwritten. The string patches below stay as idempotent fallback
+/// for those custom dirs.
+pub fn apply_overlay(backend: &str, dir: &Path) -> std::io::Result<usize> {
+    let src_root = config::resource_root().join("hunyuan_overlay").join(backend);
+    if !src_root.is_dir() || !dir.starts_with(runtime_root()) {
+        return Ok(0);
+    }
+    fn walk(src: &Path, dst: &Path, copied: &mut usize) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let s = entry.path();
+            let d = dst.join(entry.file_name());
+            if s.is_dir() {
+                std::fs::create_dir_all(&d)?;
+                walk(&s, &d, copied)?;
+            } else {
+                std::fs::copy(&s, &d)?;
+                *copied += 1;
+            }
+        }
+        Ok(())
+    }
+    let mut copied = 0;
+    walk(&src_root, dir, &mut copied)?;
+    Ok(copied)
+}
+
+/// Best-effort, idempotent performance patches for the Hunyuan3D-2mv backend.
+/// Quality-verified on the dev rig (RTX 4070 Ti SUPER, 16 GB): together with the
+/// fast gen3d defaults (20 steps / octree 192) they bring a multiview generation
+/// from minutes back to ~30-40 s. Each patch silently no-ops if already applied
+/// or if the upstream block moved.
+fn patch_mv2_perf(dir: &Path) -> std::io::Result<()> {
+    // --- 1. gradio_app.py: reduce faces BEFORE texturing. The texture bake is
+    // CPU-bound and scales with face count; baking the low-poly target mesh is
+    // ~2x faster than the upstream 40k default and gives cleaner UVs. ----------
+    let gradio = dir.join("gradio_app.py");
+    if gradio.is_file() {
+        let mut src = std::fs::read_to_string(&gradio)?;
+        const NEEDLE: &str = "    mesh = face_reduce_worker(mesh)";
+        const REPLACEMENT: &str = r#"    # assets_gen patch: reduce to the target face count BEFORE texturing (not
+    # the default 40k). Faster CPU bake, cleaner UVs. HY_FACE_NUM overrides.
+    _face_num = int(os.environ.get("HY_FACE_NUM", "8000"))
+    mesh = face_reduce_worker(mesh, max_facenum=_face_num)"#;
+        if !src.contains("HY_FACE_NUM") && src.contains(NEEDLE) {
+            src = src.replacen(NEEDLE, REPLACEMENT, 1);
+            std::fs::write(&gradio, &src)?;
+        }
+    }
+
+    // --- 2. texgen pipelines.py: 1024 render/texture instead of 2048. The bake
+    // runs on CPU (Windows TDR workaround) so its cost scales with these sizes;
+    // 1024 is ample for low-poly game assets and saves ~5 s per generation. ----
+    let pipelines = dir.join("hy3dgen").join("texgen").join("pipelines.py");
+    if pipelines.is_file() {
+        let mut src = std::fs::read_to_string(&pipelines)?;
+        const NEEDLE: &str = "        self.render_size = 2048\n        self.texture_size = 2048";
+        const REPLACEMENT: &str = r#"        # assets_gen patch: 1024 instead of 2048 (CPU bake cost scales with
+        # these). Env-overridable to restore 2048 when higher-res is needed.
+        self.render_size = int(os.environ.get("HY_RENDER_SIZE", "1024"))
+        self.texture_size = int(os.environ.get("HY_TEXTURE_SIZE", "1024"))"#;
+        if !src.contains("HY_RENDER_SIZE") && src.contains(NEEDLE) {
+            src = src.replacen(NEEDLE, REPLACEMENT, 1);
+            std::fs::write(&pipelines, &src)?;
+        }
+    }
+
+    // --- 3. text2image.py: keep the HunyuanDiT t2i pipeline OUT of VRAM until it
+    // actually runs. Upstream does a permanent `.to(cuda)`, which leaves several
+    // GB resident once --enable_t23d is on and starves the mv2 shape diffusion
+    // (~0.9 s/step -> 2-3.5 s/step measured on 16 GB). --------------------------
+    let text2image = dir.join("hy3dgen").join("text2image.py");
+    if text2image.is_file() {
+        let mut src = std::fs::read_to_string(&text2image)?;
+        const NEEDLE: &str = r#"            pag_applied_layers=["blocks.(16|17|18|19)"]
+        ).to(device)"#;
+        const REPLACEMENT: &str = r#"            pag_applied_layers=["blocks.(16|17|18|19)"]
+        )
+        # assets_gen patch: keep the t2i pipeline OUT of VRAM until it actually
+        # runs. A permanent `.to(cuda)` left HunyuanDiT (+mT5) resident and
+        # starved the mv2 shape diffusion (0.9 s/step -> 2-3.5 s/step on 16 GB).
+        # Offload moves each submodule to the GPU only during its forward pass.
+        if str(device).startswith('cuda'):
+            self.pipe.enable_model_cpu_offload()
+        else:
+            self.pipe = self.pipe.to(device)"#;
+        if !src.contains("enable_model_cpu_offload") && src.contains(NEEDLE) {
+            src = src.replacen(NEEDLE, REPLACEMENT, 1);
+            std::fs::write(&text2image, &src)?;
+        }
+    }
+
+    Ok(())
+}
 
 /// Single centralised root for the whole 3D runtime (uv Python, uv cache, HF
 /// weights cache, the venv + Hunyuan code). One folder to back up / delete.

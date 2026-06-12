@@ -16,10 +16,15 @@ use sha2::{Digest, Sha256};
 
 use crate::config;
 use crate::error::{AppError, AppResult};
-use crate::types::Gen3d;
+use crate::types::{DecimateParams, Gen3d};
 
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+/// Suppress the console window of console-subsystem children (worker.exe /
+/// uvicorn) — without it every spawn pops a terminal in the packaged app.
+/// Stops use child.kill(), not console Ctrl events, so no console is needed.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// sha256(asset_id) -> first 8 hex chars -> u64 -> % 10_000_000.
 pub fn seed_from_id(asset_id: &str) -> u64 {
@@ -57,6 +62,13 @@ struct Gen3dReq<'a> {
     image_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     view_dir: Option<String>,
+    /// Where the worker persists the untouched raw GLB (for /decimate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_dest: Option<String>,
+    /// Native text-to-3D prompt (mv2 + --enable_t23d). Mutually exclusive with
+    /// image_path/view_dir.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caption: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -64,6 +76,14 @@ struct Gen3dReq<'a> {
 struct ExportReq {
     glb: String,
     dest: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DecimateReq<'a> {
+    raw: String,
+    dest: String,
+    params: &'a DecimateParams,
 }
 
 struct Inner {
@@ -169,7 +189,7 @@ impl WorkerClient {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
         }
         let child = cmd
             .spawn()
@@ -275,6 +295,8 @@ impl WorkerClient {
         dest: &str,
         image_path: Option<&str>,
         view_dir: Option<&str>,
+        raw_dest: Option<&str>,
+        caption: Option<&str>,
     ) -> AppResult<Value> {
         let body = Gen3dReq {
             backend,
@@ -284,8 +306,20 @@ impl WorkerClient {
             dest: dest.to_string(),
             image_path: image_path.map(|s| s.to_string()),
             view_dir: view_dir.map(|s| s.to_string()),
+            raw_dest: raw_dest.map(|s| s.to_string()),
+            caption: caption.map(|s| s.to_string()),
         };
         self.post_json(&self.long, "/gen3d", &body, Duration::from_secs(3600))
+    }
+
+    /// POST /decimate (re-reduce model_raw.glb with tunable params, ~900s).
+    pub fn decimate(&self, raw: &str, dest: &str, params: &DecimateParams) -> AppResult<Value> {
+        let body = DecimateReq {
+            raw: raw.to_string(),
+            dest: dest.to_string(),
+            params,
+        };
+        self.post_json(&self.long, "/decimate", &body, Duration::from_secs(900))
     }
 
     /// POST /export.
@@ -297,16 +331,111 @@ impl WorkerClient {
         self.post_json(&self.long, "/export", &body, Duration::from_secs(600))
     }
 
-    /// Kill the sidecar (called on app exit).
+    /// Kill the sidecar and its whole process tree (called on app exit).
     pub fn stop(&self) {
         let mut guard = self.inner.lock();
         if let Some(mut child) = guard.proc.take() {
-            if matches!(child.try_wait(), Ok(None)) {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+            crate::proc::kill_child_tree(&mut child);
         }
         *self.base_url.lock() = None;
     }
+}
+
+/// The standalone texture-paint script, embedded at compile time (single source
+/// of truth with the worker). Written into the mv2 backend dir at run time so it
+/// imports hy3dgen exactly like gradio.
+const PAINT_SCRIPT: &str = include_str!("../../worker/paint_mesh.py");
+
+/// Run the standalone Hunyuan paint pass: the mv2 venv python on `paint_mesh.py`,
+/// painting an untextured mesh from a reference image into `out`. Loads only the
+/// texture pipeline (no HunyuanDiT / shapegen), so the caller MUST free the GPU
+/// first (`supervisor.ensure_gpu_free`). Blocking; takes minutes. Config-only —
+/// not a method on WorkerClient (this does not go through the worker sidecar).
+pub fn paint_mesh(cfg: &Value, mesh: &str, image: &str, out: &str) -> AppResult<()> {
+    let h = cfg
+        .get("hunyuan")
+        .and_then(|x| x.get("mv2"))
+        .ok_or_else(|| AppError::msg("config hunyuan.mv2 manquante"))?;
+    let get = |k: &str| h.get(k).and_then(|x| x.as_str()).unwrap_or("");
+    let python = get("python");
+    let dir = get("dir");
+    if python.trim().is_empty() || dir.trim().is_empty() {
+        return Err(AppError::msg(
+            "Hunyuan mv2 non configuré : renseigne le dossier et le python dans Réglages.",
+        ));
+    }
+    let backend_dir = PathBuf::from(dir);
+    if !PathBuf::from(python).is_file() || !backend_dir.is_dir() {
+        return Err(AppError::msg(
+            "Hunyuan mv2 introuvable : vérifie les chemins dans Réglages.",
+        ));
+    }
+    // Ship the current script into the backend dir so `import hy3dgen` and the
+    // hunyuanpaint custom_pipeline resolve exactly like gradio.
+    let script_path = backend_dir.join("paint_mesh.py");
+    std::fs::write(&script_path, PAINT_SCRIPT)
+        .map_err(|e| AppError::msg(format!("écriture paint_mesh.py: {e}")))?;
+
+    let texgen = {
+        let t = get("texgen_model_path");
+        if t.is_empty() {
+            "tencent/Hunyuan3D-2".to_string()
+        } else {
+            t.to_string()
+        }
+    };
+    let log_path = config::logs_dir()?.join("paint3d.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let log_err = log.try_clone()?;
+
+    let mut cmd = Command::new(python);
+    cmd.arg(&script_path)
+        .arg("--mesh")
+        .arg(mesh)
+        .arg("--image")
+        .arg(image)
+        .arg("--out")
+        .arg(out)
+        .arg("--texgen-model")
+        .arg(&texgen)
+        .arg("--backend-dir")
+        .arg(&backend_dir)
+        .current_dir(&backend_dir)
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err))
+        .stdin(std::process::Stdio::null());
+    if let Some(hf) = h.get("hf_home").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+        cmd.env("HF_HOME", hf);
+    }
+    // Resolve weights from the centralised cache, never the network.
+    cmd.env("HF_HUB_DISABLE_TELEMETRY", "1")
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    let status = cmd
+        .status()
+        .map_err(|e| AppError::msg(format!("échec lancement paint: {e}")))?;
+    if !status.success() {
+        let tail = std::fs::read_to_string(&log_path)
+            .ok()
+            .map(|s| {
+                let lines: Vec<&str> = s.lines().collect();
+                let start = lines.len().saturating_sub(25);
+                lines[start..].join("\n")
+            })
+            .unwrap_or_default();
+        return Err(AppError::msg(format!(
+            "le pass de texturing a échoué (code {:?}).\n{tail}",
+            status.code()
+        )));
+    }
+    Ok(())
 }
 

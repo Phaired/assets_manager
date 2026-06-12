@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 
 import type { AssetKind, Backend } from "../lib/types";
 import { PRESETS } from "../lib/constants";
-import { useCreateAsset } from "../lib/queries";
+import { useCreateAsset, useConfig, useGenerate } from "../lib/queries";
 import { SuggestButton } from "./SuggestButton";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -19,6 +19,16 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
+// Creation mode. "text3d" is a model asset on the mv2 backend with source="text"
+// (native offline text-to-3D, no image). The others map to the legacy kinds.
+type Mode = "model" | "text3d" | "texture";
+
+const MODES: Array<[Mode, string]> = [
+  ["model", "Modèle 3D"],
+  ["text3d", "Text-to-3D"],
+  ["texture", "Texture"],
+];
+
 export function NewAssetForm({
   project,
   onCreated,
@@ -27,11 +37,15 @@ export function NewAssetForm({
   onCreated: (id: string) => void;
 }) {
   const createAsset = useCreateAsset(project);
+  const generate = useGenerate(project);
+  const configQ = useConfig();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [backend, setBackend] = useState<Backend>("auto");
-  const [kind, setKind] = useState<AssetKind>("model");
+  const [mode, setMode] = useState<Mode>("model");
   const [error, setError] = useState<string | null>(null);
+
+  const text3dEnabled = !!configQ.data?.hunyuan?.mv2?.text3dEnabled;
 
   function applyPreset(text: string) {
     if (!text) return;
@@ -48,43 +62,54 @@ export function NewAssetForm({
       return;
     }
     if (!name.trim()) return;
+    // Map the UI mode to the backend (kind, source) pair.
+    const kind: AssetKind = mode === "texture" ? "texture" : "model";
+    const source = mode === "text3d" ? "text" : "openai";
     try {
       const a = await createAsset.mutateAsync({
         name: name.trim(),
         description: description.trim(),
         tags: [],
-        backend,
+        // text3d forces mv2 server-side; send mv2 for clarity.
+        backend: mode === "text3d" ? "mv2" : backend,
         kind,
+        source,
       });
       setName("");
       setDescription("");
-      toast.success(`Asset « ${a.name} » créé`);
+      // Select the new asset immediately so a cold-server failure surfaces in the
+      // asset detail (which has stage-error UI), not here.
       onCreated(a.id);
+      if (source === "text") {
+        // Text-to-3D: no OpenAI, no image — generate the mesh straight away
+        // (model3d + export only). Fire-and-forget.
+        generate.mutate({ assetId: a.id, stages: ["model3d", "export"] });
+        toast.success(`Génération 3D lancée pour « ${a.name} »`);
+      } else {
+        toast.success(`Asset « ${a.name} » créé`);
+      }
     } catch (err) {
       setError(String(err));
     }
   }
 
+  const text3dBlocked = mode === "text3d" && !text3dEnabled;
+
   return (
     <Card className="py-4">
       <CardContent className="px-4">
         <form className="flex flex-col gap-3" onSubmit={submit}>
-          {/* Type d'asset : modèle 3D (pipeline complet) ou texture seamless. */}
-          <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-secondary/30 p-1">
-            {(
-              [
-                ["model", "Modèle 3D"],
-                ["texture", "Texture"],
-              ] as Array<[AssetKind, string]>
-            ).map(([k, label]) => (
+          {/* Type d'asset : modèle 3D (image), text-to-3D (texte), texture. */}
+          <div className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-secondary/30 p-1">
+            {MODES.map(([m, label]) => (
               <button
-                key={k}
+                key={m}
                 type="button"
-                onClick={() => setKind(k)}
-                aria-pressed={kind === k}
+                onClick={() => setMode(m)}
+                aria-pressed={mode === m}
                 className={cn(
                   "rounded-md px-3 py-1.5 text-sm transition-colors",
-                  kind === k
+                  mode === m
                     ? "bg-primary/15 font-medium text-foreground"
                     : "text-muted-foreground hover:text-foreground",
                 )}
@@ -95,7 +120,7 @@ export function NewAssetForm({
           </div>
 
           <Input
-            placeholder={kind === "texture" ? "Nom (ex. herbe)" : "Nom (ex. crusher)"}
+            placeholder={mode === "texture" ? "Nom (ex. herbe)" : "Nom (ex. crusher)"}
             value={name}
             onChange={(e) => setName(e.target.value)}
             required
@@ -104,9 +129,11 @@ export function NewAssetForm({
           <div className="flex flex-col gap-1">
             <Textarea
               placeholder={
-                kind === "texture"
+                mode === "texture"
                   ? "Description (matière, motif, couleurs…)"
-                  : "Description (style, couleurs, forme…)"
+                  : mode === "text3d"
+                    ? "Décris l'objet à générer (ex. a red ceramic teapot, low-poly)"
+                    : "Description (style, couleurs, forme…)"
               }
               rows={3}
               value={description}
@@ -116,14 +143,14 @@ export function NewAssetForm({
               <div className="self-end">
                 <SuggestButton
                   project={project}
-                  target={kind === "texture" ? "texture" : "multiview"}
+                  target={mode === "texture" ? "texture" : "multiview"}
                   onPick={setDescription}
                 />
               </div>
             )}
           </div>
 
-          {kind === "model" && (
+          {mode === "model" && (
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="mr-1 text-xs text-muted-foreground">Exemples :</span>
               {PRESETS.map((p) => (
@@ -140,7 +167,7 @@ export function NewAssetForm({
             </div>
           )}
 
-          {kind === "model" && (
+          {mode === "model" && (
             <Select
               value={backend}
               onValueChange={(v) => setBackend(v as Backend)}
@@ -156,19 +183,37 @@ export function NewAssetForm({
             </Select>
           )}
 
+          {mode === "text3d" && (
+            <p className="text-xs text-muted-foreground">
+              Génère le maillage directement depuis le texte (Hunyuan 2mv,
+              hors-ligne, sans OpenAI). Aucune image n'est nécessaire.
+            </p>
+          )}
+
+          {text3dBlocked && (
+            <p className="flex items-start gap-2 rounded-md bg-run/15 px-3 py-2 text-sm text-run">
+              <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+              Le text-to-3D n'est pas encore activé. Active-le dans l'installeur
+              3D (bouton « Activer le text-to-3D »).
+            </p>
+          )}
+
           {error && (
             <p className="rounded-md bg-destructive/15 px-3 py-2 text-sm text-destructive">
               {error}
             </p>
           )}
 
-          <Button type="submit" disabled={createAsset.isPending || !project}>
+          <Button
+            type="submit"
+            disabled={createAsset.isPending || !project || text3dBlocked}
+          >
             {createAsset.isPending ? (
               <Loader2 size={15} className="animate-spin" />
             ) : (
               <Sparkles size={15} />
             )}
-            Créer l'asset
+            {mode === "text3d" ? "Générer le modèle 3D" : "Créer l'asset"}
           </Button>
         </form>
       </CardContent>

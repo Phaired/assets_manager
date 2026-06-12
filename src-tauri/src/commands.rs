@@ -17,10 +17,11 @@ use crate::jobs::JobManager;
 use crate::store::Store;
 use crate::supervisor::Supervisor;
 use crate::types::{
-    Asset, AudioBundle, AudioItem, ConfigPatch, ConfigPublic, Gen3dPatch, InstallProgress,
-    JobCurrent, Project, ProjectBundle, ProjectDna, ProjectState, ServerStatus, Voice,
-    VoicePreview,
+    Asset, AudioBundle, AudioItem, ConfigPatch, ConfigPublic, DecimateParams, DecimatePatch,
+    Gen3dPatch, InstallProgress, JobCurrent, Project, ProjectBundle, ProjectDna, ProjectState,
+    ServerStatus, Voice, VoicePreview,
 };
+use crate::worker::WorkerClient;
 
 type CmdResult<T> = Result<T, String>;
 
@@ -95,12 +96,23 @@ pub fn create_asset(
     tags: Vec<String>,
     backend: String,
     kind: Option<String>,
+    source: Option<String>,
 ) -> CmdResult<Asset> {
     let kind = kind.unwrap_or_else(|| "model".to_string());
     if kind != "model" && kind != "texture" {
         return Err(format!("type d'asset invalide: {kind}"));
     }
-    let asset_v = store.add_asset(&project, &name, &description, tags, &backend, &kind)?;
+    let source = source.unwrap_or_else(|| "openai".to_string());
+    if source != "openai" && source != "manual" && source != "text" {
+        return Err(format!("source d'asset invalide: {source}"));
+    }
+    // Native text-to-3D is a model asset on the mv2 backend (HunyuanDiT t2i).
+    let (kind, backend) = if source == "text" {
+        ("model".to_string(), "mv2".to_string())
+    } else {
+        (kind, backend)
+    };
+    let asset_v = store.add_asset(&project, &name, &description, tags, &backend, &kind, &source)?;
     events::emit_project_changed(&app, &project);
     Ok(Asset::from_disk(&asset_v))
 }
@@ -268,6 +280,280 @@ pub fn set_asset_gen3d(
     store.set_asset_gen3d(&project, &asset_id, over)?;
     events::emit_project_changed(&app, &project);
     Ok(())
+}
+
+/// Set or clear the per-asset decimation override. An empty patch clears the
+/// override and reverts to global defaults.
+#[tauri::command]
+pub fn set_asset_decimate(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    decimate: DecimatePatch,
+) -> CmdResult<()> {
+    let _ = store.get_asset(&project, &asset_id)?;
+    let over = serde_json::Value::Object(decimate.to_snake_object());
+    store.set_asset_decimate(&project, &asset_id, over)?;
+    events::emit_project_changed(&app, &project);
+    Ok(())
+}
+
+/// At most one decimation per (project, asset) at a time — guards the
+/// "Appliquer" button against double-clicks (the worker itself can serve
+/// /decimate concurrently with a running gen3d).
+#[derive(Default)]
+pub struct DecimateLocks(parking_lot::Mutex<std::collections::HashSet<String>>);
+
+struct DecimateLockGuard {
+    locks: Arc<DecimateLocks>,
+    key: String,
+}
+
+impl DecimateLocks {
+    fn acquire(self: &Arc<Self>, project: &str, asset_id: &str) -> CmdResult<DecimateLockGuard> {
+        let key = format!("{project}/{asset_id}");
+        if !self.0.lock().insert(key.clone()) {
+            return Err("une réduction est déjà en cours pour cet asset".into());
+        }
+        Ok(DecimateLockGuard {
+            locks: Arc::clone(self),
+            key,
+        })
+    }
+}
+
+impl Drop for DecimateLockGuard {
+    fn drop(&mut self) {
+        self.locks.0.lock().remove(&self.key);
+    }
+}
+
+/// Re-decimate the persisted raw mesh (model_raw.glb -> model.glb) with the
+/// effective params (config defaults <- per-asset override <- one-shot patch).
+/// Runs as a direct command, NOT a queue job: the job queue is serial and a
+/// gen3d can hold it for ~30 min, which would kill the interactive
+/// tweak-polycount workflow. Progress persists in the "decimate" stage key
+/// (not part of STAGES — no pipeline card, but it survives restarts).
+#[tauri::command]
+pub async fn decimate_model(
+    app: tauri::AppHandle,
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    worker: State<'_, Arc<WorkerClient>>,
+    locks: State<'_, Arc<DecimateLocks>>,
+    project: String,
+    asset_id: String,
+    params: Option<DecimatePatch>,
+) -> CmdResult<serde_json::Value> {
+    let asset = store.get_asset(&project, &asset_id)?;
+    let raw = store.model_raw_path(&project, &asset_id)?;
+    if !raw.is_file() {
+        return Err(
+            "maillage brut absent — relance l'étape 3D pour le générer (les modèles \
+             créés avant cette version n'ont pas conservé leur maillage brut)"
+                .into(),
+        );
+    }
+
+    // Refuse while the asset's pipeline stages are queued/running (the gen3d
+    // would overwrite model.glb under us).
+    let state = store.load_state(&project)?;
+    if let Some(stages) = state.get("assets").and_then(|a| a.get(&asset_id)) {
+        for key in ["model3d", "export", "decimate"] {
+            let status = stages
+                .get(key)
+                .and_then(|s| s.get("status"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            if status == "running" || status == "queued" {
+                return Err(format!("étape {key} en cours — réessaie quand elle est finie"));
+            }
+        }
+    }
+    let guard = locks.inner().acquire(&project, &asset_id)?;
+
+    // Effective params: global defaults <- per-asset override <- call patch
+    // (everything snake_case, like the gen3d merge in stage_model3d).
+    let cfg = config.load();
+    let mut merged = cfg.get("decimate").cloned().unwrap_or(serde_json::Value::Null);
+    if let Some(over) = asset.get("decimate") {
+        merged = crate::config::deep_merge(&merged, over);
+    }
+    if let Some(patch) = &params {
+        merged = crate::config::deep_merge(
+            &merged,
+            &serde_json::Value::Object(patch.to_snake_object()),
+        );
+    }
+    let effective = DecimateParams::from_config(&merged);
+    let dest = store.model_path(&project, &asset_id)?;
+
+    store.update_stage(&project, &asset_id, "decimate", "running", None, None)?;
+    events::emit_project_changed(&app, &project);
+
+    let worker = Arc::clone(worker.inner());
+    let raw_s = raw.to_string_lossy().to_string();
+    let dest_s = dest.to_string_lossy().to_string();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        worker.decimate(&raw_s, &dest_s, &effective)
+    })
+    .await
+    .map_err(|e| format!("tâche de réduction interrompue: {e}"));
+    drop(guard);
+
+    match result.and_then(|r| r.map_err(|e| e.to_string())) {
+        Ok(meta) => {
+            store.update_stage(
+                &project,
+                &asset_id,
+                "decimate",
+                "done",
+                None,
+                Some(meta.clone()),
+            )?;
+            // The OBJ export was made from the previous model.glb — mark it stale.
+            store.update_stage(&project, &asset_id, "export", "pending", None, None)?;
+            // Decimate re-reads the UNtextured raw mesh — any prior paint is gone,
+            // so the model is untextured again: re-offer the Texturer button.
+            store.update_stage(&project, &asset_id, "paint3d", "pending", None, None)?;
+            events::emit_project_changed(&app, &project);
+            Ok(meta)
+        }
+        Err(message) => {
+            let _ = store.update_stage(
+                &project,
+                &asset_id,
+                "decimate",
+                "error",
+                Some(&message),
+                None,
+            );
+            events::emit_project_changed(&app, &project);
+            Err(message)
+        }
+    }
+}
+
+/// At most one paint pass per (project, asset) at a time (the pass holds the
+/// exclusive GPU; this guards the "Texturer" button against double-clicks).
+#[derive(Default)]
+pub struct Paint3dLocks(parking_lot::Mutex<std::collections::HashSet<String>>);
+
+struct Paint3dLockGuard {
+    locks: Arc<Paint3dLocks>,
+    key: String,
+}
+
+impl Paint3dLocks {
+    fn acquire(self: &Arc<Self>, project: &str, asset_id: &str) -> CmdResult<Paint3dLockGuard> {
+        let key = format!("{project}/{asset_id}");
+        if !self.0.lock().insert(key.clone()) {
+            return Err("un texturing est déjà en cours pour cet asset".into());
+        }
+        Ok(Paint3dLockGuard {
+            locks: Arc::clone(self),
+            key,
+        })
+    }
+}
+
+impl Drop for Paint3dLockGuard {
+    fn drop(&mut self) {
+        self.locks.0.lock().remove(&self.key);
+    }
+}
+
+/// Texture an untextured model.glb via the standalone Hunyuan paint pass. Frees
+/// the GPU (stops the gradio server + verifies it's down), holds the supervisor's
+/// exclusive-GPU gate so no queued model3d job restarts gradio mid-paint, runs the
+/// mv2-venv python on paint_mesh.py, then overwrites model.glb in place. Non-queued
+/// (mirrors /decimate). Progress in the "paint3d" stage key.
+#[tauri::command]
+pub async fn paint_model(
+    app: tauri::AppHandle,
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    supervisor: State<'_, Arc<Supervisor>>,
+    locks: State<'_, Arc<Paint3dLocks>>,
+    project: String,
+    asset_id: String,
+) -> CmdResult<serde_json::Value> {
+    let _asset = store.get_asset(&project, &asset_id)?;
+    let model = store.model_path(&project, &asset_id)?;
+    if !model.is_file() {
+        return Err("modèle 3D absent — génère d'abord le modèle (sans texture).".into());
+    }
+    // Reference: ref.png (rembg'd by the patched gradio) -> source.png -> front view.
+    let reference = {
+        let r = store.paint_ref_path(&project, &asset_id)?;
+        let s = store.source_image_path(&project, &asset_id)?;
+        let f = store.multiview_dir(&project, &asset_id)?.join("front.png");
+        [r, s, f]
+            .into_iter()
+            .find(|p| p.is_file())
+            .ok_or_else(|| {
+                "aucune image de référence (ref.png / source.png / multivue) — \
+                 impossible de texturer."
+                    .to_string()
+            })?
+    };
+
+    // Refuse while a pipeline stage that touches model.glb runs for THIS asset.
+    let state = store.load_state(&project)?;
+    if let Some(stages) = state.get("assets").and_then(|a| a.get(&asset_id)) {
+        for key in ["model3d", "export", "decimate", "paint3d"] {
+            let status = stages
+                .get(key)
+                .and_then(|s| s.get("status"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            if status == "running" || status == "queued" {
+                return Err(format!("étape {key} en cours — réessaie quand elle est finie"));
+            }
+        }
+    }
+    let guard = locks.inner().acquire(&project, &asset_id)?;
+
+    store.update_stage(&project, &asset_id, "paint3d", "running", None, None)?;
+    events::emit_project_changed(&app, &project);
+
+    let cfg = config.load();
+    let model_s = model.to_string_lossy().to_string();
+    let ref_s = reference.to_string_lossy().to_string();
+    let untextured = store.model_untextured_path(&project, &asset_id)?;
+    let _ = std::fs::copy(&model, &untextured); // keep the pre-paint mesh for revert
+    let dest_s = model_s.clone(); // overwrite model.glb in place
+
+    let supervisor = Arc::clone(supervisor.inner());
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // Hold the exclusive-GPU gate for the whole pass; the job runner's ensure()
+        // blocks on it so gradio is never restarted mid-paint.
+        let _gpu = supervisor.acquire_gpu();
+        // Stop the managed child AND confirm no adopted server is still up.
+        supervisor.ensure_gpu_free(15).map_err(|e| e.to_string())?;
+        crate::worker::paint_mesh(&cfg, &model_s, &ref_s, &dest_s).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("tâche de texturing interrompue: {e}"));
+    drop(guard);
+
+    match result.and_then(|r| r) {
+        Ok(()) => {
+            let meta = serde_json::json!({ "painted": true });
+            store.update_stage(&project, &asset_id, "paint3d", "done", None, Some(meta.clone()))?;
+            // The OBJ export was made from the untextured model — mark it stale.
+            store.update_stage(&project, &asset_id, "export", "pending", None, None)?;
+            events::emit_project_changed(&app, &project);
+            Ok(meta)
+        }
+        Err(message) => {
+            let _ = std::fs::copy(&untextured, &model); // restore on failure
+            let _ = store.update_stage(&project, &asset_id, "paint3d", "error", Some(&message), None);
+            events::emit_project_changed(&app, &project);
+            Err(message)
+        }
+    }
 }
 
 #[tauri::command]
@@ -773,6 +1059,20 @@ pub fn install_backend(
     let progress = installer
         .inner()
         .start(app, Arc::clone(supervisor.inner()), &backend)?;
+    Ok(progress)
+}
+
+/// Optional add-on: download the native text-to-image model (HunyuanDiT) and
+/// enable text-to-3D on the mv2 server. Requires mv2 already installed.
+#[tauri::command]
+pub fn install_text3d(
+    app: tauri::AppHandle,
+    installer: State<'_, Arc<Installer>>,
+    supervisor: State<'_, Arc<Supervisor>>,
+) -> CmdResult<InstallProgress> {
+    let progress = installer
+        .inner()
+        .install_text3d(app, Arc::clone(supervisor.inner()))?;
     Ok(progress)
 }
 

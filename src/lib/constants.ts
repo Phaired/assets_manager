@@ -41,14 +41,19 @@ export const TEXTURE_STAGE: StageDef = {
 
 export const TEXTURE_STAGES: StageDef[] = [TEXTURE_STAGE];
 
-/** Stage definitions of an asset, by kind. */
-export function stageDefsForKind(kind: AssetKind): StageDef[] {
-  return kind === "texture" ? TEXTURE_STAGES : STAGES;
+/** Stage definitions of an asset, by kind + source. Native text-to-3D
+ *  (source "text") drops the OpenAI multiview stage entirely. */
+export function stageDefsForKind(kind: AssetKind, source?: string): StageDef[] {
+  if (kind === "texture") return TEXTURE_STAGES;
+  if (source === "text") return [STAGES[1], STAGES[2]]; // model3d, export — no OpenAI
+  return STAGES;
 }
 
-/** Stage keys of an asset, by kind. */
-export function stagesForKind(kind: AssetKind): StageKey[] {
-  return kind === "texture" ? ["texture"] : ALL_STAGES;
+/** Stage keys of an asset, by kind + source. */
+export function stagesForKind(kind: AssetKind, source?: string): StageKey[] {
+  if (kind === "texture") return ["texture"];
+  if (source === "text") return ["model3d", "export"];
+  return ALL_STAGES;
 }
 
 export const VIEW_FILES = ["front", "back", "left", "right"] as const;
