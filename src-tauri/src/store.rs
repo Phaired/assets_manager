@@ -536,6 +536,21 @@ impl Store {
     /// generated files copied). Name gets a " (copie)" suffix; the new id is a
     /// deduplicated slug. Returns the new asset object.
     pub fn duplicate_asset(&self, project: &str, asset_id: &str) -> AppResult<Value> {
+        self.clone_asset_config(project, asset_id, " (copie)")
+    }
+
+    /// Create a variant record: cloned config + `derived_from` link back to the
+    /// parent. No generated files copied; the caller fills the pipeline.
+    pub fn derive_asset_record(&self, project: &str, parent_id: &str) -> AppResult<Value> {
+        let new = self.clone_asset_config(project, parent_id, " (variante)")?;
+        let new_id = new.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        self.mutate_asset(project, &new_id, |o| {
+            o.insert("derived_from".into(), Value::String(parent_id.to_string()));
+        })?;
+        self.get_asset(project, &new_id)
+    }
+
+    fn clone_asset_config(&self, project: &str, asset_id: &str, name_suffix: &str) -> AppResult<Value> {
         // Read the source config (outside the LOCK held by add_asset).
         let src = self.get_asset(project, asset_id)?;
         let name = src.get("name").and_then(|x| x.as_str()).unwrap_or("asset");
@@ -555,7 +570,7 @@ impl Store {
 
         let new = self.add_asset(
             project,
-            &format!("{name} (copie)"),
+            &format!("{name}{name_suffix}"),
             description,
             tags,
             backend,

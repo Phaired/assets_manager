@@ -5,6 +5,7 @@
 //! every transition and `project-changed` / `job-changed` events are emitted.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
@@ -40,6 +41,9 @@ pub struct JobManager {
     tx: Sender<Job>,
     state: Arc<Mutex<State>>,
     app: Arc<Mutex<Option<AppHandle>>>,
+    /// Set by `request_cancel`; the runner consumes it to halt the in-flight job
+    /// (stages reset to `pending`) instead of reporting the interrupt as an error.
+    cancel: Arc<AtomicBool>,
 }
 
 impl JobManager {
@@ -56,11 +60,13 @@ impl JobManager {
             pending: VecDeque::new(),
         }));
         let app: Arc<Mutex<Option<AppHandle>>> = Arc::new(Mutex::new(None));
+        let cancel = Arc::new(AtomicBool::new(false));
 
         let manager = Arc::new(JobManager {
             tx,
             state: Arc::clone(&state),
             app: Arc::clone(&app),
+            cancel: Arc::clone(&cancel),
         });
 
         // Worker thread.
@@ -71,6 +77,7 @@ impl JobManager {
             worker,
             state: Arc::clone(&state),
             app: Arc::clone(&app),
+            cancel: Arc::clone(&cancel),
         };
         std::thread::spawn(move || runner.run(rx));
 
@@ -80,6 +87,15 @@ impl JobManager {
     /// Wire up the AppHandle once the Tauri app is built (for event emission).
     pub fn set_app(&self, app: AppHandle) {
         *self.app.lock() = Some(app);
+    }
+
+    /// Request cancellation of the in-flight job. The runner picks this up at the
+    /// next stage boundary (or when the interrupted stage returns) and resets the
+    /// remaining stages to `pending`. Pair with `Supervisor::interrupt` to also
+    /// abort the GPU work already running. Returns the current job, if any.
+    pub fn request_cancel(&self) -> Option<JobCurrent> {
+        self.cancel.store(true, Ordering::SeqCst);
+        self.state.lock().current.clone()
     }
 
     fn emit_job(&self) {
@@ -163,6 +179,7 @@ struct Runner {
     worker: Arc<WorkerClient>,
     state: Arc<Mutex<State>>,
     app: Arc<Mutex<Option<AppHandle>>>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Runner {
@@ -217,23 +234,50 @@ impl Runner {
     }
 
     fn run_job(&self, job: &Job) {
-        for stage in &job.stages {
+        // Fresh job starts uncancelled (drop any flag left set after the previous
+        // job already finished before its cancel landed).
+        self.cancel.store(false, Ordering::SeqCst);
+        for (idx, stage) in job.stages.iter().enumerate() {
             match self.run_stage(&job.project, &job.asset_id, stage) {
-                Ok(()) => {}
+                Ok(()) => {
+                    // Honour a cancel that arrived too late to abort this stage:
+                    // stop before the next one and leave the rest cleanly pending.
+                    if self.cancel.swap(false, Ordering::SeqCst) {
+                        self.reset_stages_pending(job, idx + 1);
+                        self.emit_project(&job.project);
+                        break;
+                    }
+                }
                 Err(e) => {
-                    let _ = self.store.update_stage(
-                        &job.project,
-                        &job.asset_id,
-                        stage,
-                        "error",
-                        Some(&e.to_string()),
-                        None,
-                    );
+                    if self.cancel.swap(false, Ordering::SeqCst) {
+                        // User cancel: the interrupt surfaced as a stage error.
+                        // Reset this stage and the remaining ones to pending so the
+                        // asset is cleanly retryable (not stuck in error/queued).
+                        self.reset_stages_pending(job, idx);
+                    } else {
+                        let _ = self.store.update_stage(
+                            &job.project,
+                            &job.asset_id,
+                            stage,
+                            "error",
+                            Some(&e.to_string()),
+                            None,
+                        );
+                    }
                     self.emit_project(&job.project);
-                    // A failed stage blocks the remaining ones (they depend on it).
+                    // A failed/cancelled stage blocks the remaining ones (they depend on it).
                     break;
                 }
             }
+        }
+    }
+
+    /// Reset `job.stages[from..]` to `pending` (cancellation cleanup).
+    fn reset_stages_pending(&self, job: &Job, from: usize) {
+        for stage in &job.stages[from..] {
+            let _ =
+                self.store
+                    .update_stage(&job.project, &job.asset_id, stage, "pending", None, None);
         }
     }
 
@@ -263,8 +307,13 @@ impl Runner {
         let asset_id = asset.get("id").and_then(|x| x.as_str()).unwrap_or("");
         let source = asset.get("source").and_then(|x| x.as_str()).unwrap_or("");
         let source_path = self.store.source_image_path(project, asset_id)?;
+        // A hand-edited multiview (edit_multiview) also flips the asset to
+        // `manual` but may have no source.png — only the edited sheet. Treat an
+        // existing sheet as authoritative too, so the views are never regenerated
+        // (and overwritten) from the prompt.
+        let sheet = self.store.multiview_dir(project, asset_id)?.join("sheet.png");
 
-        if source == "manual" && source_path.is_file() {
+        if source == "manual" && (source_path.is_file() || sheet.is_file()) {
             self.store.update_stage(
                 project,
                 asset_id,

@@ -568,47 +568,43 @@ pub fn reset_asset(
     Ok(())
 }
 
-/// Edit the asset's source image via OpenAI (prompt + optional mask) and
-/// overwrite source.png. Marks the source `manual` and resets the model3d/export
-/// stages to `pending` so the user can rebuild the 3D from the edited image.
-#[tauri::command]
-pub fn edit_image(
-    app: tauri::AppHandle,
-    config: State<'_, Arc<Config>>,
-    store: State<'_, Arc<Store>>,
-    project: String,
-    asset_id: String,
-    prompt: String,
-    mask_bytes: Option<Vec<u8>>,
-) -> CmdResult<UploadResult> {
-    let _ = store.get_asset(&project, &asset_id)?;
-    if prompt.trim().is_empty() {
-        return Err("le prompt d'édition est vide".into());
-    }
+/// Outcome of one `/v1/images/edits` call routed through [`run_openai_edit`]:
+/// the edited PNG bytes plus the metadata the callers fold into their stage
+/// records / spend accounting.
+struct EditOutcome {
+    edited: Vec<u8>,
+    usage: Option<serde_json::Value>,
+    model: String,
+    quality: String,
+    cost: f64,
+    /// `Some` when the cost came from the API usage block, `None` when it fell
+    /// back to the flat estimate (surfaced as `cost_source` in stage meta).
+    real_cost: Option<f64>,
+    /// Project spend total after debiting this edit.
+    spent: f64,
+}
 
-    let cfg = config.load();
-    let api_key = crate::config::openai_key(&cfg);
+/// Shared OpenAI image-edit machinery behind the in-place source edit, the
+/// in-place multiview edit and the derive-to-variant flow: key + budget gate,
+/// optional inpainting mask, style-coherent prompt, the API call and the
+/// real-cost spend accounting. The caller resolves `base` (which image to send)
+/// and decides where the returned bytes land.
+fn run_openai_edit(
+    cfg: &serde_json::Value,
+    store: &Store,
+    project: &str,
+    asset_id: &str,
+    base: &std::path::Path,
+    prompt: &str,
+    mask_bytes: Option<Vec<u8>>,
+) -> CmdResult<EditOutcome> {
+    let api_key = crate::config::openai_key(cfg);
     if api_key.is_empty() {
         return Err("OPENAI_API_KEY absent (Réglages ou .env)".into());
     }
 
-    // Resolve the image to edit: source.png if present, else the multiview front.
-    let source = store.source_image_path(&project, &asset_id)?;
-    let base = if source.is_file() {
-        source.clone()
-    } else {
-        let front = store
-            .multiview_dir(&project, &asset_id)?
-            .join("front.png");
-        if front.is_file() {
-            front
-        } else {
-            return Err("aucune image à éditer : génère d'abord l'image source".into());
-        }
-    };
-
     // Budget gate (same accounting as the multiview stage).
-    let state = store.load_state(&project)?;
+    let state = store.load_state(project)?;
     let current_spend = state
         .get("estimated_spend_usd")
         .and_then(|x| x.as_f64())
@@ -628,7 +624,7 @@ pub fn edit_image(
 
     // Persist the optional mask to a temp file alongside the asset.
     let mask_path = if let Some(bytes) = mask_bytes.filter(|b| !b.is_empty()) {
-        let p = store.asset_dir(&project, &asset_id)?.join(".edit_mask.png");
+        let p = store.asset_dir(project, asset_id)?.join(".edit_mask.png");
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).map_err(AppError::from)?;
         }
@@ -647,7 +643,7 @@ pub fn edit_image(
     let timeout = cfg.get("openai_timeout").and_then(|x| x.as_i64()).unwrap_or(300);
 
     // Keep edits coherent with the project DNA / style.
-    let style_block = store.project_style_block(&project).unwrap_or_default();
+    let style_block = store.project_style_block(project).unwrap_or_default();
     let full_prompt = if style_block.is_empty() {
         prompt.trim().to_string()
     } else {
@@ -657,7 +653,7 @@ pub fn edit_image(
     // Pure-Rust OpenAI edit call (the Python worker is not involved).
     let result = crate::openai::edit_image(
         &api_key,
-        &base,
+        base,
         &full_prompt,
         model,
         "", // size omitted for edits (API matches the input image; "auto" is invalid here)
@@ -672,20 +668,69 @@ pub fn edit_image(
     }
     let (edited, usage) = result?;
 
+    // Account the REAL spend from the API usage block when the model is priced
+    // (fallback: flat estimate).
+    let real_cost = usage
+        .as_ref()
+        .and_then(|u| crate::config::image_cost_from_usage(cfg, model, u));
+    let cost = real_cost.unwrap_or(est_cost);
+    let spent = store.add_spend(project, cost)?;
+
+    Ok(EditOutcome {
+        edited,
+        usage,
+        model: model.to_string(),
+        quality: quality.to_string(),
+        cost,
+        real_cost,
+        spent,
+    })
+}
+
+/// Edit the asset's source image via OpenAI (prompt + optional mask) and
+/// overwrite source.png. Marks the source `manual` and resets the model3d/export
+/// stages to `pending` so the user can rebuild the 3D from the edited image.
+#[tauri::command]
+pub fn edit_image(
+    app: tauri::AppHandle,
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    prompt: String,
+    mask_bytes: Option<Vec<u8>>,
+) -> CmdResult<UploadResult> {
+    let _ = store.get_asset(&project, &asset_id)?;
+    if prompt.trim().is_empty() {
+        return Err("le prompt d'édition est vide".into());
+    }
+
+    // Resolve the image to edit: source.png if present, else the multiview front.
+    let source = store.source_image_path(&project, &asset_id)?;
+    let base = if source.is_file() {
+        source.clone()
+    } else {
+        let front = store
+            .multiview_dir(&project, &asset_id)?
+            .join("front.png");
+        if front.is_file() {
+            front
+        } else {
+            return Err("aucune image à éditer : génère d'abord l'image source".into());
+        }
+    };
+
+    let cfg = config.load();
+    let out = run_openai_edit(&cfg, &store, &project, &asset_id, &base, &prompt, mask_bytes)?;
+
     // Overwrite source.png with the edited image.
     if let Some(parent) = source.parent() {
         std::fs::create_dir_all(parent).map_err(AppError::from)?;
     }
-    std::fs::write(&source, &edited)
+    std::fs::write(&source, &out.edited)
         .map_err(|e| AppError::msg(format!("écriture de l'image éditée: {e}")))?;
 
-    // Account the REAL spend from the API usage block when the model is priced
-    // (fallback: flat estimate), flip to a manual source, invalidate downstream.
-    let cost = usage
-        .as_ref()
-        .and_then(|u| crate::config::image_cost_from_usage(&cfg, model, u))
-        .unwrap_or(est_cost);
-    let _ = store.add_spend(&project, cost)?;
+    // Flip to a manual source and invalidate downstream.
     store.set_asset_source(&project, &asset_id, "manual")?;
     store.update_stage(&project, &asset_id, "model3d", "pending", None, None)?;
     store.update_stage(&project, &asset_id, "export", "pending", None, None)?;
@@ -694,6 +739,129 @@ pub fn edit_image(
     Ok(UploadResult {
         source: "manual".to_string(),
     })
+}
+
+/// Edit the asset's multiview sheet in place via OpenAI (prompt + optional mask),
+/// re-split it over the 4 existing views and reset the model3d/export stages.
+/// Unlike `derive_asset` (which forks a variant), this overwrites the SAME
+/// asset's sheet so the 4 views change uniformly and the user can rebuild a
+/// coherent model. Requires the sheet on disk.
+#[tauri::command]
+pub fn edit_multiview(
+    app: tauri::AppHandle,
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    prompt: String,
+    mask_bytes: Option<Vec<u8>>,
+) -> CmdResult<()> {
+    let _ = store.get_asset(&project, &asset_id)?;
+    if prompt.trim().is_empty() {
+        return Err("le prompt d'édition est vide".into());
+    }
+
+    let mv_dir = store.multiview_dir(&project, &asset_id)?;
+    let sheet = mv_dir.join("sheet.png");
+    if !sheet.is_file() {
+        return Err("génère d'abord la planche multivue".into());
+    }
+
+    let cfg = config.load();
+    let out = run_openai_edit(&cfg, &store, &project, &asset_id, &sheet, &prompt, mask_bytes)?;
+
+    // Re-split the edited sheet over the existing views (overwrites sheet + 4 views).
+    crate::openai::split_sheet(&out.edited, &mv_dir)?;
+
+    // Re-stamp multiview `done` (a fresh updatedAt busts the thumbnail cache) and
+    // reset the 3D stages so the user rebuilds from the edited sheet.
+    let mut meta = serde_json::json!({
+        "model": out.model,
+        "quality": out.quality,
+        "files": ["sheet.png", "front.png", "back.png", "left.png", "right.png"],
+        "cost": out.cost,
+        "cost_source": if out.real_cost.is_some() { "api" } else { "estimate" },
+        "estimated_spend_usd": out.spent,
+        "edit_prompt": prompt.trim(),
+    });
+    if let (Some(obj), Some(u)) = (meta.as_object_mut(), out.usage) {
+        obj.insert("usage".into(), u);
+    }
+    // Flip to a manual source so the "Tout générer" CTA short-circuits the
+    // multiview stage (stage_multiview keeps the edited sheet instead of
+    // regenerating it from the prompt) — same protection as edit_image.
+    store.set_asset_source(&project, &asset_id, "manual")?;
+    store.update_stage(&project, &asset_id, "multiview", "done", None, Some(meta))?;
+    store.update_stage(&project, &asset_id, "model3d", "pending", None, None)?;
+    store.update_stage(&project, &asset_id, "export", "pending", None, None)?;
+
+    events::emit_project_changed(&app, &project);
+    Ok(())
+}
+
+/// Derive a variant asset: edit the parent's multiview sheet via OpenAI
+/// (prompt + optional mask), write the result into a NEW linked asset, split it
+/// into the 4 views and mark its multiview stage done. 3D is NOT auto-run —
+/// the user reviews the edited sheet then triggers `generate` themselves.
+#[tauri::command]
+pub fn derive_asset(
+    app: tauri::AppHandle,
+    config: State<'_, Arc<Config>>,
+    store: State<'_, Arc<Store>>,
+    project: String,
+    asset_id: String,
+    prompt: String,
+    mask_bytes: Option<Vec<u8>>,
+) -> CmdResult<Asset> {
+    let parent = store.get_asset(&project, &asset_id)?;
+    if prompt.trim().is_empty() {
+        return Err("le prompt de dérivation est vide".into());
+    }
+    if parent.get("kind").and_then(|x| x.as_str()) == Some("texture") {
+        return Err("dériver une texture n'est pas encore supporté".into());
+    }
+
+    // The derivation edits the parent's full 2x2 sheet so the 4 views stay
+    // coherent and the variant can go straight to the 3D stage.
+    let sheet = store.multiview_dir(&project, &asset_id)?.join("sheet.png");
+    if !sheet.is_file() {
+        return Err("génère d'abord la planche multivue du parent".into());
+    }
+
+    let cfg = config.load();
+    let out = run_openai_edit(&cfg, &store, &project, &asset_id, &sheet, &prompt, mask_bytes)?;
+
+    // Only create the variant once the OpenAI call has succeeded, so a failed
+    // edit never leaves an orphan asset behind.
+    let new = store.derive_asset_record(&project, &asset_id)?;
+    let new_id = new
+        .get("id")
+        .and_then(|x| x.as_str())
+        .ok_or("asset dérivé sans id")?
+        .to_string();
+
+    let out_dir = store.multiview_dir(&project, &new_id)?;
+    crate::openai::split_sheet(&out.edited, &out_dir)?;
+
+    // Mark the variant's multiview done (spend already debited by run_openai_edit).
+    let mut meta = serde_json::json!({
+        "model": out.model,
+        "quality": out.quality,
+        "files": ["sheet.png", "front.png", "back.png", "left.png", "right.png"],
+        "cost": out.cost,
+        "cost_source": if out.real_cost.is_some() { "api" } else { "estimate" },
+        "estimated_spend_usd": out.spent,
+        "derived_from": asset_id,
+        "edit_prompt": prompt.trim(),
+    });
+    if let (Some(obj), Some(u)) = (meta.as_object_mut(), out.usage) {
+        obj.insert("usage".into(), u);
+    }
+    store.update_stage(&project, &new_id, "multiview", "done", None, Some(meta))?;
+
+    events::emit_project_changed(&app, &project);
+    let new = store.get_asset(&project, &new_id)?;
+    Ok(Asset::from_disk(&new))
 }
 
 // --- creative director (OpenAI text) --------------------------------------
@@ -956,6 +1124,21 @@ pub fn generate(
     let _ = store.get_asset(&project, &asset_id)?;
     let current = jobs.enqueue(store.inner().as_ref(), &project, &asset_id, stages)?;
     Ok(current)
+}
+
+/// Stop the in-flight generation WITHOUT unloading the models: flag the job for
+/// cancellation (the runner resets its stages to `pending`) and POST `/interrupt`
+/// to the inference server so it aborts the current GPU run between diffusion
+/// steps (models stay resident — unlike stopping the server). Returns whether the
+/// server acknowledged the interrupt; the job flag is set regardless.
+#[tauri::command]
+pub fn cancel_generation(
+    jobs: State<'_, Arc<JobManager>>,
+    supervisor: State<'_, Arc<Supervisor>>,
+) -> CmdResult<bool> {
+    // Set the flag first so the interrupt-induced stage error is read as a cancel.
+    jobs.request_cancel();
+    Ok(supervisor.interrupt())
 }
 
 // --- config -------------------------------------------------------------

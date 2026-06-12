@@ -40,6 +40,9 @@ pub struct Asset {
     /// Per-asset multiview prompt override. Absent → uses the global template.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_override: Option<String>,
+    /// Id of the parent asset this one was derived from (variant). Absent on originals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
 }
 
 impl Asset {
@@ -81,6 +84,11 @@ impl Asset {
             seed: v.get("seed").and_then(|x| x.as_i64()),
             prompt_override: v
                 .get("prompt_override")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            derived_from: v
+                .get("derived_from")
                 .and_then(|x| x.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string()),

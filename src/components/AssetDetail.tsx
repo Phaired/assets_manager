@@ -189,11 +189,15 @@ export function AssetDetail({
       : (exportState?.meta?.textured as boolean | undefined) ??
         (asset.gen3d?.texture ?? configQ.data?.gen3d?.texture ?? true);
 
+  // A derived asset's multiview came from editing its parent's sheet — never
+  // regenerate it from the text prompt (that would overwrite the derivation).
+  const keepDerivedViews = !!asset.derivedFrom && mvDone;
+
   const primaryLabel = modelReady
     ? "Régénérer"
     : isTexture
       ? "Générer la texture"
-      : isText
+      : isText || keepDerivedViews
         ? "Générer le modèle 3D"
         : "Tout générer";
 
@@ -257,7 +261,13 @@ export function AssetDetail({
         ctaDisabled={generate.isPending || jobBusy}
         jobRunning={jobBusy}
         progressPct={prog?.pct ?? null}
-        onGenerate={() => runStages(stagesForKind(asset.kind, asset.source))}
+        onGenerate={() =>
+          runStages(
+            stagesForKind(asset.kind, asset.source).filter(
+              (s) => !(keepDerivedViews && s === "multiview"),
+            ),
+          )
+        }
         onDeleted={onDeleted}
         compact={compact}
         panelOpen={panelOpen}
@@ -310,6 +320,7 @@ export function AssetDetail({
                 uploadPending={upload.isPending}
                 onUpload={onUploadFile}
                 editDisabled={asset.source !== "manual" && !mvDone}
+                editLabel={mvDone ? "Modifier la multivue" : "Modifier l'image"}
                 onEditImage={() => setEditOpen(true)}
               />
             )}
@@ -356,6 +367,7 @@ export function AssetDetail({
         <ImageEditDialog
           project={project}
           assetId={assetId}
+          target={mvDone ? "multiview" : "source"}
           onClose={() => setEditOpen(false)}
         />
       )}

@@ -22,6 +22,7 @@ export function MultiviewStrip({
   uploadPending,
   onUpload,
   editDisabled,
+  editLabel,
   onEditImage,
 }: {
   project: string;
@@ -32,6 +33,8 @@ export function MultiviewStrip({
   uploadPending: boolean;
   onUpload: (file: File | undefined | null) => void;
   editDisabled: boolean;
+  /** Button label — reflects whether the edit targets the sheet or the source. */
+  editLabel: string;
   onEditImage: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -90,9 +93,9 @@ export function MultiviewStrip({
           size="sm"
           onClick={onEditImage}
           disabled={editDisabled}
-          title="Modifier l'image source via OpenAI (couleur, détails…)"
+          title="Modifier l'image via OpenAI (couleur, détails…) — la planche multivue si elle existe"
         >
-          <Paintbrush /> Modifier l'image
+          <Paintbrush /> {editLabel}
         </Button>
       </div>
 

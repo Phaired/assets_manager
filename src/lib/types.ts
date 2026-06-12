@@ -30,6 +30,8 @@ export interface Asset {
   seed?: number;
   /** Per-asset multiview prompt override. Absent → uses the global template. */
   promptOverride?: string;
+  /** Id of the parent asset this one was derived from (variant). */
+  derivedFrom?: string; // disk: derived_from
 }
 
 export interface StageState {

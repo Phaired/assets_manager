@@ -232,6 +232,22 @@ itself `error` and ABORTS the remaining stages of that job.
 
 State transitions persist to state.json AND emit `project-changed`.
 
+**Cancel (cooperative, models stay loaded).** Command `cancel_generation {}` → `bool`
+(server acknowledged). Sets a shared `AtomicBool` on the JobManager
+(`request_cancel`) AND calls `Supervisor::interrupt` which POSTs `/interrupt` to the
+live inference server. The runner clears the flag at each job start; when a stage
+returns it consumes the flag: on the interrupt-induced stage error (or a too-late
+cancel after an `Ok` stage) it resets that stage + the remaining ones to `pending`
+(clean, retryable — not `error`/stuck-`queued`) instead of reporting an error. The
+mv2 gradio overlay adds the `/interrupt` route + a per-step forward pre-hook on each
+diffusion denoiser (shape DiT, texgen unets) that raises `gr.Error("Génération
+interrompue")` between steps — so the GPU run aborts WITHOUT unloading the models
+(unlike `server_stop`/`Supervisor::stop`, which kill the process). The overlay is
+re-applied on server (re)start, so the patched server must be (re)started once for the
+route to exist; v21 has no `/interrupt` (cancel still halts the pipeline after the
+current run, returns `false`). UI: the header CTA swaps to a destructive « Arrêter »
+button while `jobBusy` (`useCancelGeneration`).
+
 ## Hunyuan supervisor (Rust) — port of `server_manager.py`
 
 - One backend at a time (single GPU): starting one stops the other.
@@ -371,6 +387,43 @@ Commands:
 UI: `SuggestButton` (NewAssetForm description, LinkedAudioSection, NewAudioForm),
 `PackIdeationDialog` (sidebar « Idéation IA », création en masse, option
 « lancer la génération »).
+
+### Édition multivue en place
+Command `edit_multiview {project, assetId, prompt, maskBytes?}` → `void`
+(synchronous, like `edit_image`): sends the asset's own `multiview/sheet.png` to
+`/v1/images/edits` (prompt + optional mask, style block appended), re-splits the
+edited sheet over the SAME asset's 4 views (`openai::split_sheet`) and re-stamps
+its `multiview` stage `done` (fresh updatedAt busts thumbnails; meta:
+files/usage/cost/cost_source/`edit_prompt`), then resets `model3d`/`export` to
+`pending`. Unlike `derive_asset` it overwrites the current asset (no variant) so
+the 4 views change uniformly and a coherent model can be rebuilt. It also flips
+the asset `source` to `manual`; `stage_multiview` now short-circuits to `done`
+when `source == "manual"` and EITHER source.png OR the sheet exists (was: source.png
+only) — so the « Tout générer » CTA never regenerates and overwrites the edited
+sheet (mv2, the main path, consumes the 4 views directly). Requires the sheet on
+disk; same budget gate/accounting as `edit_image` (shared helper `run_openai_edit`
+behind all three edit flows). UI: the « Modifier l'image »
+button in `MultiviewStrip` becomes « Modifier la multivue » once the sheet exists;
+`ImageEditDialog` takes a `target:"source"|"multiview"` prop (sheet when `mvDone`,
+else source.png with a front fallback).
+
+### Dérivation d'assets (variantes)
+`Asset` gains optional `derived_from` (disk snake_case, bridge `derivedFrom`) —
+id of the parent asset. Command `derive_asset {project, assetId, prompt, maskBytes?}`
+→ `Asset` (synchronous, like `edit_image`): sends the parent's
+`multiview/sheet.png` to `/v1/images/edits` (prompt + optional mask, style block
+appended), then — only on success — creates the variant via
+`Store::derive_asset_record` (config clone "{name} (variante)" + `derived_from`),
+splits the edited sheet into the variant's 4 views (`openai::split_sheet`) and
+marks its `multiview` stage `done` (meta: files/usage/cost/cost_source/
+`derived_from`/`edit_prompt`). Same budget gate/accounting as `edit_image`.
+model3d/export stay `pending` — the user reviews the sheet then clicks the CTA.
+v1 is model-kind only (texture assets: explicit error) and requires the parent's
+sheet on disk. UI: « Créer une variante » in the AssetHeader dropdown
+(`DeriveAssetDialog`, clone of ImageEditDialog on the sheet), badge
+« dérivé de {parent} » (navigates to the parent). The detail CTA never re-enqueues
+`multiview` on a derived asset whose views exist (it would overwrite the paid
+derivation); per-stage retry remains explicit.
 
 ## Capabilities / security
 - Enable `core:event`, `core:window`, dialog/fs/opener as needed.

@@ -207,12 +207,42 @@ export function editImage(
   });
 }
 
+/** Edit the asset's multiview sheet in place via OpenAI. `maskBytes` (optional)
+ *  restricts the edit to the painted (transparent) region. Re-splits the 4 views
+ *  and resets the 3D stages so the user rebuilds from the edited sheet. */
+export function editMultiview(
+  project: string,
+  assetId: string,
+  prompt: string,
+  maskBytes: number[] | null,
+): Promise<void> {
+  return invoke("edit_multiview", { project, assetId, prompt, maskBytes });
+}
+
+/** Derive a variant asset: edit the parent's multiview sheet via OpenAI and
+ *  return the NEW asset (multiview done, 3D stages pending — not auto-run). */
+export function deriveAsset(
+  project: string,
+  assetId: string,
+  prompt: string,
+  maskBytes: number[] | null,
+): Promise<Asset> {
+  return invoke<Asset>("derive_asset", { project, assetId, prompt, maskBytes });
+}
+
 export function generate(
   project: string,
   assetId: string,
   stages: StageKey[],
 ): Promise<JobCurrent | null> {
   return invoke<JobCurrent | null>("generate", { project, assetId, stages });
+}
+
+/** Stop the in-flight generation without unloading the models: flags the job for
+ *  cancellation and asks the inference server to abort the current GPU run
+ *  between diffusion steps. Resolves to whether the server acknowledged. */
+export function cancelGeneration(): Promise<boolean> {
+  return invoke<boolean>("cancel_generation");
 }
 
 /** Creative director: 3 suggested prompts for one modality, from the DNA. */

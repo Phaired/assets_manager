@@ -214,6 +214,16 @@ export function useGenerate(project: string | null) {
   });
 }
 
+export function useCancelGeneration(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.cancelGeneration(),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
 export function useSetAssetGen3d(project: string | null) {
   const qc = useQueryClient();
   return useMutation({
@@ -272,6 +282,46 @@ export function useEditImage(project: string | null) {
       maskBytes: number[] | null;
     }) =>
       api.editImage(project as string, vars.assetId, vars.prompt, vars.maskBytes),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useEditMultiview(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      assetId: string;
+      prompt: string;
+      maskBytes: number[] | null;
+    }) =>
+      api.editMultiview(
+        project as string,
+        vars.assetId,
+        vars.prompt,
+        vars.maskBytes,
+      ),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+export function useDeriveAsset(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      assetId: string;
+      prompt: string;
+      maskBytes: number[] | null;
+    }) =>
+      api.deriveAsset(
+        project as string,
+        vars.assetId,
+        vars.prompt,
+        vars.maskBytes,
+      ),
     onSuccess: () => {
       if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
     },

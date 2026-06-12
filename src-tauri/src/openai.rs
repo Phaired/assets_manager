@@ -111,7 +111,7 @@ fn pad_square(view: &RgbImage) -> RgbImage {
 }
 
 /// Split the 2x2 sheet into `sheet.png` + the four padded 1024² views.
-fn split_sheet(sheet_bytes: &[u8], output_dir: &Path) -> AppResult<()> {
+pub fn split_sheet(sheet_bytes: &[u8], output_dir: &Path) -> AppResult<()> {
     let sheet = image::load_from_memory(sheet_bytes)
         .map_err(|e| AppError::msg(format!("planche multivue illisible: {e}")))?
         .to_rgb8();

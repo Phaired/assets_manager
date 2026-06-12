@@ -31,6 +31,46 @@ from hy3dgen.shapegen.utils import logger
 
 MAX_SEED = int(1e7)
 
+# --- assets_gen patch: cooperative interrupt -----------------------------------
+# Lets the host app abort an in-flight generation WITHOUT killing the server
+# (the models stay loaded in VRAM). POST /interrupt sets a flag; a forward
+# pre-hook on each diffusion denoiser checks it every step and raises, so the
+# generation stops at the next step boundary instead of unloading the GPU.
+import threading
+
+_ASSETS_GEN_INTERRUPT = threading.Event()
+
+
+def _assets_gen_check_interrupt():
+    """Raise (one-shot) if an interrupt was requested. Called per diffusion step
+    via a forward pre-hook; cheap when the flag is clear."""
+    if _ASSETS_GEN_INTERRUPT.is_set():
+        _ASSETS_GEN_INTERRUPT.clear()
+        raise gr.Error("Génération interrompue")
+
+
+def _assets_gen_reset_interrupt():
+    """Drop any stale request so each new generation starts clean."""
+    _ASSETS_GEN_INTERRUPT.clear()
+
+
+def _assets_gen_install_step_hook(module, label):
+    """Register a forward pre-hook so `module` aborts between steps. Best-effort:
+    diffusion pipelines call their denoiser once per step, so hooking the
+    denoiser/unet gives step-level cancellation. Silently skips a missing module."""
+    if module is None or not hasattr(module, "register_forward_pre_hook"):
+        return False
+
+    def _hook(_mod, _args):
+        _assets_gen_check_interrupt()
+
+    module.register_forward_pre_hook(_hook)
+    try:
+        logger.info(f"[assets_gen] interrupt hook installed on {label}")
+    except Exception:
+        pass
+    return True
+
 
 def get_example_img_list():
     print('Loading example img list ...')
@@ -268,6 +308,7 @@ def generation_all(
     num_chunks=200000,
     randomize_seed: bool = False,
 ):
+    _assets_gen_reset_interrupt()  # assets_gen patch: fresh run, drop stale cancel
     start_time_0 = time.time()
     mesh, image, save_folder, stats, seed = _gen_shape(
         caption,
@@ -338,6 +379,7 @@ def shape_generation(
     num_chunks=200000,
     randomize_seed: bool = False,
 ):
+    _assets_gen_reset_interrupt()  # assets_gen patch: fresh run, drop stale cancel
     start_time_0 = time.time()
     mesh, image, save_folder, stats, seed = _gen_shape(
         caption,
@@ -758,9 +800,33 @@ if __name__ == '__main__':
     degenerate_face_remove_worker = DegenerateFaceRemover()
     face_reduce_worker = FaceReducer()
 
+    # assets_gen patch: install the cooperative-interrupt hooks on every diffusion
+    # denoiser so /interrupt can stop a run between steps (models stay resident).
+    # The shape pipeline exposes its DiT under a couple of names across versions —
+    # hook whichever exist; hooking a non-denoiser is harmless (just an extra check).
+    for _attr in ("model", "transformer", "dit", "denoiser"):
+        _assets_gen_install_step_hook(getattr(i23d_worker, _attr, None), f"i23d_worker.{_attr}")
+    if HAS_TEXTUREGEN:
+        for _key in ("multiview_model", "delight_model"):
+            try:
+                _unet = texgen_worker.models[_key].pipeline.unet
+            except Exception:
+                _unet = None
+            _assets_gen_install_step_hook(_unet, f"texgen.{_key}.unet")
+    if args.enable_t23d and 't2i_worker' in globals() and t2i_worker is not None:
+        _assets_gen_install_step_hook(getattr(t2i_worker, "transformer", None), "t2i_worker.transformer")
+        _assets_gen_install_step_hook(getattr(getattr(t2i_worker, "pipeline", None), "transformer", None), "t2i_worker.pipeline.transformer")
+
     # https://discuss.huggingface.co/t/how-to-serve-an-html-file/33921/2
     # create a FastAPI app
     app = FastAPI()
+
+    # assets_gen patch: interrupt endpoint. Registered BEFORE the gradio mount at
+    # "/" so it takes precedence. Sets the flag the per-step hooks watch.
+    @app.post("/interrupt")
+    def _assets_gen_interrupt_route():
+        _ASSETS_GEN_INTERRUPT.set()
+        return {"interrupted": True}
     # create a static directory to store the static files
     static_dir = Path(SAVE_DIR).absolute()
     static_dir.mkdir(parents=True, exist_ok=True)

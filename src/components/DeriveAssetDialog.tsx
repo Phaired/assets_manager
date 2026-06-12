@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Wand2, Eraser, Loader2, AlertTriangle } from "lucide-react";
+import { GitBranch, Eraser, Loader2, AlertTriangle } from "lucide-react";
 
 import {
   Dialog,
@@ -12,34 +12,30 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { assetFileUrl } from "../lib/api";
-import { useEditImage, useEditMultiview } from "../lib/queries";
+import { useDeriveAsset } from "../lib/queries";
+import type { Asset } from "../lib/types";
 
 /**
- * Edit an asset's image via OpenAI. `target` picks what is sent and overwritten:
- *  - "multiview": the full 2x2 sheet, re-split over the 4 views so they change
- *    uniformly (a coherent model can then be rebuilt).
- *  - "source": source.png (the front), with a multiview-front fallback.
- * The prompt describes the change; the optional brush paints the region to edit
- * (everything else is preserved). The exported mask is a PNG where painted pixels
- * are transparent — OpenAI inpainting semantics. Resets the 3D stages either way.
+ * Derive a variant asset: edit the parent's full multiview sheet via OpenAI so
+ * the 4 views stay coherent. The prompt describes the change; the optional
+ * brush paints the region to edit (transparent pixels in the exported mask —
+ * OpenAI inpainting semantics). Creates a NEW asset linked to the parent with
+ * its multiview done; the 3D stages stay pending for the user to review first.
  */
-export function ImageEditDialog({
+export function DeriveAssetDialog({
   project,
   assetId,
-  target,
   onClose,
+  onCreated,
 }: {
   project: string;
   assetId: string;
-  target: "source" | "multiview";
   onClose: () => void;
+  onCreated: (asset: Asset) => void;
 }) {
-  const editSource = useEditImage(project);
-  const editMultiview = useEditMultiview(project);
-  const edit = target === "multiview" ? editMultiview : editSource;
+  const derive = useDeriveAsset(project);
   const [prompt, setPrompt] = useState("");
   const [imgUrl, setImgUrl] = useState<string | null>(null);
-  const [triedFront, setTriedFront] = useState(false);
   const [imgError, setImgError] = useState(false);
   const [hasMask, setHasMask] = useState(false);
 
@@ -48,14 +44,12 @@ export function ImageEditDialog({
   const drawing = useRef(false);
   const stamp = useRef(Date.now());
 
-  // Resolve the image to edit: the multiview sheet, or the source (with a
-  // multiview-front fallback handled in onImgError).
+  // The derivation requires the parent's 2x2 sheet — no fallback.
   useEffect(() => {
     let active = true;
-    const file = target === "multiview" ? "multiview/sheet.png" : "source.png";
     (async () => {
       try {
-        const base = await assetFileUrl(project, assetId, file);
+        const base = await assetFileUrl(project, assetId, "multiview/sheet.png");
         if (active) setImgUrl(`${base}?t=${stamp.current}`);
       } catch {
         if (active) setImgError(true);
@@ -64,22 +58,7 @@ export function ImageEditDialog({
     return () => {
       active = false;
     };
-  }, [project, assetId, target]);
-
-  async function onImgError() {
-    // No fallback when editing the sheet: it is required.
-    if (target === "multiview" || triedFront) {
-      setImgError(true);
-      return;
-    }
-    setTriedFront(true);
-    try {
-      const base = await assetFileUrl(project, assetId, "multiview/front.png");
-      setImgUrl(`${base}?t=${stamp.current}`);
-    } catch {
-      setImgError(true);
-    }
-  }
+  }, [project, assetId]);
 
   // Size the overlay canvas to the image's natural resolution once it loads.
   function onImgLoad() {
@@ -165,9 +144,14 @@ export function ImageEditDialog({
   async function onApply() {
     if (!prompt.trim()) return;
     const maskBytes = await buildMaskBytes();
-    edit.mutate(
+    derive.mutate(
       { assetId, prompt: prompt.trim(), maskBytes },
-      { onSuccess: () => onClose() },
+      {
+        onSuccess: (created) => {
+          onCreated(created);
+          onClose();
+        },
+      },
     );
   }
 
@@ -180,13 +164,11 @@ export function ImageEditDialog({
     >
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>
-            {target === "multiview" ? "Modifier la multivue" : "Modifier l'image"}
-          </DialogTitle>
+          <DialogTitle>Créer une variante</DialogTitle>
           <DialogDescription>
-            {target === "multiview"
-              ? "Décris la modification appliquée à la planche multivue — les 4 vues changent ensemble. Peins (optionnel) la zone à modifier ; le 3D sera à régénérer."
-              : "Décris la modification. Peins (optionnel) la zone à modifier — le reste de l'image est préservé."}
+            Décris la modification appliquée à la planche multivue. Peins
+            (optionnel) la zone à modifier. La variante sera créée comme nouvel
+            asset lié — le 3D reste à lancer après vérification.
           </DialogDescription>
         </DialogHeader>
 
@@ -194,11 +176,7 @@ export function ImageEditDialog({
           {imgError ? (
             <div className="flex flex-col items-center gap-2.5 whitespace-nowrap text-sm text-destructive">
               <AlertTriangle size={24} />
-              <span>
-                {target === "multiview"
-                  ? "Aucune planche multivue à éditer."
-                  : "Aucune image source à éditer."}
-              </span>
+              <span>La planche multivue du parent est requise.</span>
             </div>
           ) : (
             <div className="relative inline-block max-h-[52vh] max-w-full leading-[0]">
@@ -206,9 +184,9 @@ export function ImageEditDialog({
                 <img
                   ref={imgRef}
                   src={imgUrl}
-                  alt="source"
+                  alt="planche multivue"
                   onLoad={onImgLoad}
-                  onError={onImgError}
+                  onError={() => setImgError(true)}
                   draggable={false}
                   className="block max-h-[52vh] max-w-full select-none rounded-md"
                 />
@@ -231,14 +209,14 @@ export function ImageEditDialog({
 
         <Textarea
           rows={2}
-          placeholder="ex. rends la cape rouge, garde le reste identique"
+          placeholder="ex. rends l'armure dorée, garde le reste identique"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
         />
 
-        {edit.isError && (
+        {derive.isError && (
           <p className="text-sm text-destructive">
-            {(edit.error as Error)?.message ?? "échec de l'édition"}
+            {(derive.error as Error)?.message ?? "échec de la dérivation"}
           </p>
         )}
 
@@ -247,21 +225,21 @@ export function ImageEditDialog({
             variant="ghost"
             size="sm"
             onClick={clearMask}
-            disabled={!hasMask || edit.isPending}
+            disabled={!hasMask || derive.isPending}
           >
             <Eraser size={14} /> Effacer le masque
           </Button>
           <Button
             size="sm"
             onClick={onApply}
-            disabled={!prompt.trim() || imgError || edit.isPending}
+            disabled={!prompt.trim() || imgError || derive.isPending}
           >
-            {edit.isPending ? (
+            {derive.isPending ? (
               <Loader2 size={14} className="animate-spin" />
             ) : (
-              <Wand2 size={14} />
+              <GitBranch size={14} />
             )}
-            Appliquer
+            Créer la variante
           </Button>
         </DialogFooter>
       </DialogContent>

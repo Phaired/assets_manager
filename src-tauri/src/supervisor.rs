@@ -373,6 +373,37 @@ impl Supervisor {
         guard.backend = None;
     }
 
+    /// Cooperative cancel: POST `/interrupt` to the running inference server so it
+    /// aborts the current generation between diffusion steps while keeping the
+    /// models resident in VRAM (unlike `stop()`, which kills the process). Best
+    /// effort — returns true only if a server acknowledged. No-op when nothing is
+    /// up or the backend has no `/interrupt` route (the mv2 overlay adds it).
+    pub fn interrupt(&self) -> bool {
+        let cfg = self.config.load();
+        // Prefer the backend we believe is live; otherwise try both.
+        let candidates: Vec<String> = match self.inner.lock().backend.clone() {
+            Some(b) => vec![b],
+            None => vec!["mv2".to_string(), "v21".to_string()],
+        };
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        for b in candidates {
+            if let Some(base) = base_url(&b, &cfg) {
+                if let Ok(r) = client.post(format!("{base}/interrupt")).send() {
+                    if r.status().is_success() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Resolve the asset backend: explicit v21/mv2, else prefer a running server,
     /// else config default_backend.
     pub fn resolve_backend(&self, asset_backend: &str) -> String {

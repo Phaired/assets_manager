@@ -1,11 +1,13 @@
 import { useState } from "react";
 import {
   Copy,
+  GitBranch,
   Loader2,
   MoreHorizontal,
   Pencil,
   RotateCcw,
   SlidersHorizontal,
+  Square,
   Tag as TagIcon,
   Trash2,
   Wand2,
@@ -15,12 +17,15 @@ import { toast } from "sonner";
 
 import type { Asset } from "@/lib/types";
 import {
+  useCancelGeneration,
   useDeleteAsset,
   useDuplicateAsset,
+  useProject,
   useRenameAsset,
   useResetAsset,
   useSetAssetTags,
 } from "@/lib/queries";
+import { DeriveAssetDialog } from "@/components/DeriveAssetDialog";
 import { useAppState } from "@/lib/appState";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -61,15 +66,22 @@ export function AssetHeader({
   onTogglePanel: () => void;
 }) {
   const reset = useResetAsset(project);
+  const cancel = useCancelGeneration(project);
   const del = useDeleteAsset(project);
   const rename = useRenameAsset(project);
   const duplicate = useDuplicateAsset(project);
   const setTags = useSetAssetTags(project);
   const { setAssetId } = useAppState();
+  const bundle = useProject(project);
 
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [tagDraft, setTagDraft] = useState("");
+  const [deriving, setDeriving] = useState(false);
+
+  const parentName = asset.derivedFrom
+    ? bundle.data?.project.assets.find((a) => a.id === asset.derivedFrom)?.name
+    : undefined;
 
   function commitRename() {
     setRenaming(false);
@@ -153,13 +165,40 @@ export function AssetHeader({
           </Badge>
         )}
 
-        <Button onClick={onGenerate} disabled={ctaDisabled} className="shrink-0">
-          {jobRunning ? <Loader2 className="animate-spin" /> : <Wand2 />}
-          {primaryLabel}
-          {jobRunning && progressPct != null && (
-            <span className="font-mono text-xs opacity-80">{progressPct}%</span>
-          )}
-        </Button>
+        {jobRunning ? (
+          <Button
+            variant="destructive"
+            onClick={() =>
+              cancel.mutate(undefined, {
+                onSuccess: (acked) =>
+                  toast.success(
+                    acked
+                      ? "Arrêt demandé — le modèle reste chargé"
+                      : "Arrêt demandé",
+                  ),
+                onError: (e) => toast.error(`Échec de l'arrêt : ${String(e)}`),
+              })
+            }
+            disabled={cancel.isPending}
+            className="shrink-0"
+            title="Arrêter la génération en cours (les modèles restent chargés en VRAM)"
+          >
+            {cancel.isPending ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Square />
+            )}
+            Arrêter
+            {progressPct != null && (
+              <span className="font-mono text-xs opacity-80">{progressPct}%</span>
+            )}
+          </Button>
+        ) : (
+          <Button onClick={onGenerate} disabled={ctaDisabled} className="shrink-0">
+            <Wand2 />
+            {primaryLabel}
+          </Button>
+        )}
 
         {compact && (
           <Button
@@ -191,6 +230,11 @@ export function AssetHeader({
             <DropdownMenuItem onClick={onDuplicate} disabled={duplicate.isPending}>
               <Copy size={14} /> Dupliquer
             </DropdownMenuItem>
+            {asset.kind === "model" && (
+              <DropdownMenuItem onClick={() => setDeriving(true)}>
+                <GitBranch size={14} /> Créer une variante
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem
               onClick={onDelete}
               disabled={del.isPending}
@@ -203,6 +247,16 @@ export function AssetHeader({
       </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        {asset.derivedFrom && (
+          <button
+            onClick={() => setAssetId(asset.derivedFrom!)}
+            title="Voir l'asset parent"
+            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-card px-2 py-0.5 text-xs text-muted-foreground hover:border-primary hover:text-foreground"
+          >
+            <GitBranch size={11} />
+            dérivé de {parentName ?? asset.derivedFrom}
+          </button>
+        )}
         {asset.description && (
           <p
             className="min-w-0 max-w-[60ch] truncate text-sm text-muted-foreground"
@@ -243,6 +297,18 @@ export function AssetHeader({
           />
         </div>
       </div>
+
+      {deriving && (
+        <DeriveAssetDialog
+          project={project}
+          assetId={asset.id}
+          onClose={() => setDeriving(false)}
+          onCreated={(created) => {
+            toast.success("Variante créée");
+            setAssetId(created.id);
+          }}
+        />
+      )}
     </div>
   );
 }
