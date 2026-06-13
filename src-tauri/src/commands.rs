@@ -1141,6 +1141,29 @@ pub fn cancel_generation(
     Ok(supervisor.interrupt())
 }
 
+/// Drop all queued (not-yet-started) jobs and reset their stages to `pending`.
+/// The running job keeps going — use `cancel_generation` to stop that one.
+#[tauri::command]
+pub fn clear_queue(
+    store: State<'_, Arc<Store>>,
+    jobs: State<'_, Arc<JobManager>>,
+) -> CmdResult<()> {
+    jobs.clear_queue(store.inner().as_ref())?;
+    Ok(())
+}
+
+/// Remove a single queued job by id and reset its stages to `pending`. No-op for
+/// the job currently running (the queue head) — cancel it instead.
+#[tauri::command]
+pub fn remove_queued(
+    store: State<'_, Arc<Store>>,
+    jobs: State<'_, Arc<JobManager>>,
+    job_id: u64,
+) -> CmdResult<()> {
+    jobs.remove_queued(store.inner().as_ref(), job_id)?;
+    Ok(())
+}
+
 // --- config -------------------------------------------------------------
 
 #[tauri::command]

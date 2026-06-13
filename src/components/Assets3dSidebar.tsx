@@ -14,11 +14,17 @@ import type {
   Asset,
   AssetKind,
   ProjectBundle,
+  StageKey,
   StageStatus,
 } from "../lib/types";
-import { stageDefsForKind, stagesForKind } from "../lib/constants";
-import { useGenerate } from "../lib/queries";
+import {
+  STAGE_STATUS_COLOR,
+  stageDefsForKind,
+  stagesForKind,
+} from "../lib/constants";
+import { useGenerate, useServer } from "../lib/queries";
 import { useAppState } from "../lib/appState";
+import { planAssetImages } from "../lib/assetStatus";
 import { assetFileUrl } from "../lib/api";
 import { PackIdeationDialog } from "./PackIdeationDialog";
 import { ProjectDnaPanel } from "./ProjectDnaPanel";
@@ -34,15 +40,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-
-/** Maps a stage status to the dot color class. */
-const DOT_COLOR: Record<StageStatus, string> = {
-  pending: "bg-muted-foreground/40",
-  queued: "bg-run",
-  running: "bg-run animate-pulse",
-  done: "bg-ok",
-  error: "bg-destructive",
-};
 
 type SortKey = "date" | "name" | "status";
 
@@ -129,6 +126,7 @@ export function Assets3dSidebar({
 }) {
   const { project, assetId, setAssetId } = useAppState();
   const generate = useGenerate(project);
+  const serverQ = useServer();
   const assets = bundle?.project.assets ?? [];
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<SortKey>("date");
@@ -159,6 +157,38 @@ export function Assets3dSidebar({
       count++;
     }
     if (count) toast.success(`${count} asset(s) en file`);
+  }
+
+  // Assets ready for 3D model generation: image prerequisites met (not blocked)
+  // and the model3d stage not done. Enqueues ONLY model3d + export — never the
+  // OpenAI image stages (the multiview is assumed already generated).
+  const ready3dAssets = useMemo(
+    () =>
+      assets.filter((a) => {
+        if (a.kind === "texture") return false;
+        if (stageStatus(bundle, a.id, "model3d") === "done") return false;
+        return (
+          planAssetImages(
+            a,
+            stageStatus(bundle, a.id, "multiview"),
+            serverQ.data ?? null,
+          ).model3dBlocked === null
+        );
+      }),
+    [assets, bundle, serverQ.data],
+  );
+
+  function generate3dReady() {
+    let count = 0;
+    for (const a of ready3dAssets) {
+      const stages = (["model3d", "export"] as StageKey[]).filter(
+        (s) => stageStatus(bundle, a.id, s) !== "done",
+      );
+      if (!stages.length) continue;
+      generate.mutate({ assetId: a.id, stages });
+      count++;
+    }
+    if (count) toast.success(`${count} modèle(s) en file`);
   }
 
   // All distinct tags across the project's assets (for the filter chips).
@@ -216,13 +246,24 @@ export function Assets3dSidebar({
                 ? `${visible.length}/${assets.length}`
                 : assets.length}
             </span>
+            {ready3dAssets.length > 0 && (
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={generate3dReady}
+                disabled={generate.isPending}
+                title="Lance la 3D (model3d + export) pour tous les assets prêts dont le modèle n'est pas fait — n'utilise pas l'API images."
+              >
+                <Boxes size={13} /> 3D ({ready3dAssets.length})
+              </Button>
+            )}
             {pendingAssets.length > 0 && (
               <Button
                 size="xs"
                 variant="ghost"
                 onClick={generateAllPending}
                 disabled={generate.isPending}
-                title="Lance les étapes manquantes de tous les assets non terminés"
+                title="Lance les étapes manquantes de tous les assets non terminés (multivue OpenAI incluse)"
               >
                 <Wand2 size={13} /> Tout ({pendingAssets.length})
               </Button>
@@ -377,7 +418,7 @@ export function Assets3dSidebar({
                     return (
                       <span
                         key={s.key}
-                        className={cn("size-2 rounded-full", DOT_COLOR[status])}
+                        className={cn("size-2 rounded-full", STAGE_STATUS_COLOR[status])}
                         title={`${s.label}: ${status}`}
                       />
                     );

@@ -1,4 +1,10 @@
-import type { AssetKind, AudioKind, AudioStatus, StageKey } from "./types";
+import type {
+  AssetKind,
+  AudioKind,
+  AudioStatus,
+  StageKey,
+  StageStatus,
+} from "./types";
 
 export interface StageDef {
   key: StageKey;
@@ -55,6 +61,16 @@ export function stagesForKind(kind: AssetKind, source?: string): StageKey[] {
   if (source === "text") return ["model3d", "export"];
   return ALL_STAGES;
 }
+
+/** Status dot color classes for pipeline stages — shared by the asset list, the
+ *  generation queue panel and the stage strip. */
+export const STAGE_STATUS_COLOR: Record<StageStatus, string> = {
+  pending: "bg-muted-foreground/40",
+  queued: "bg-run",
+  running: "bg-run animate-pulse",
+  done: "bg-ok",
+  error: "bg-destructive",
+};
 
 export const VIEW_FILES = ["front", "back", "left", "right"] as const;
 

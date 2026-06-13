@@ -245,6 +245,18 @@ export function cancelGeneration(): Promise<boolean> {
   return invoke<boolean>("cancel_generation");
 }
 
+/** Drop all queued (not-yet-running) jobs; their stages reset to "pending". The
+ *  job currently running keeps going (use cancelGeneration to stop that one). */
+export function clearQueue(): Promise<void> {
+  return invoke<void>("clear_queue");
+}
+
+/** Remove one queued job by id; its stages reset to "pending". No-op for the job
+ *  currently running (the queue head). */
+export function removeQueued(jobId: number): Promise<void> {
+  return invoke<void>("remove_queued", { jobId });
+}
+
 /** Creative director: 3 suggested prompts for one modality, from the DNA. */
 export function suggestPrompts(
   project: string,

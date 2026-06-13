@@ -224,6 +224,28 @@ export function useCancelGeneration(project: string | null) {
   });
 }
 
+/** Drop every queued job (the running one keeps going). */
+export function useClearQueue(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.clearQueue(),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
+/** Remove a single queued job by id. */
+export function useRemoveQueued(project: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (jobId: number) => api.removeQueued(jobId),
+    onSuccess: () => {
+      if (project) qc.invalidateQueries({ queryKey: qk.project(project) });
+    },
+  });
+}
+
 export function useSetAssetGen3d(project: string | null) {
   const qc = useQueryClient();
   return useMutation({

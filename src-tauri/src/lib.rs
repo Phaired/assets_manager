@@ -168,6 +168,8 @@ pub fn run() {
             commands::derive_asset,
             commands::generate,
             commands::cancel_generation,
+            commands::clear_queue,
+            commands::remove_queued,
             commands::suggest_prompts,
             commands::ideate_pack,
             commands::save_render,

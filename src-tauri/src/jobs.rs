@@ -4,7 +4,7 @@
 //! Each job = (project, asset_id, [stages]). State is persisted to state.json on
 //! every transition and `project-changed` / `job-changed` events are emitted.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -32,13 +32,19 @@ struct Job {
 struct State {
     current: Option<JobCurrent>,
     counter: u64,
-    /// Mirror of the queue size for snapshots (the real items live in the mpsc
-    /// channel; we track a parallel deque length).
-    pending: VecDeque<u64>,
+    /// Jobs waiting to run, in FIFO order — the source of truth for the queue.
+    /// While a job runs it stays at the front (`pending[0]`) and is popped only
+    /// once it finishes, so the queued tail (`pending[1..]`) is exactly what
+    /// `clear_queue` / `remove_queued` may touch without racing the worker.
+    pending: VecDeque<Job>,
 }
 
 pub struct JobManager {
-    tx: Sender<Job>,
+    /// Wake-up "doorbell" for the worker thread; the real queue is `state.pending`.
+    /// One `()` is sent per enqueue — the worker drains the queue on each wake and
+    /// tolerates spurious/empty wakes (a job may be removed before the worker
+    /// reaches it).
+    wake: Sender<()>,
     state: Arc<Mutex<State>>,
     app: Arc<Mutex<Option<AppHandle>>>,
     /// Set by `request_cancel`; the runner consumes it to halt the in-flight job
@@ -53,7 +59,7 @@ impl JobManager {
         supervisor: Arc<Supervisor>,
         worker: Arc<WorkerClient>,
     ) -> Arc<Self> {
-        let (tx, rx): (Sender<Job>, Receiver<Job>) = mpsc::channel();
+        let (wake_tx, wake_rx): (Sender<()>, Receiver<()>) = mpsc::channel();
         let state = Arc::new(Mutex::new(State {
             current: None,
             counter: 0,
@@ -63,7 +69,7 @@ impl JobManager {
         let cancel = Arc::new(AtomicBool::new(false));
 
         let manager = Arc::new(JobManager {
-            tx,
+            wake: wake_tx,
             state: Arc::clone(&state),
             app: Arc::clone(&app),
             cancel: Arc::clone(&cancel),
@@ -79,7 +85,7 @@ impl JobManager {
             app: Arc::clone(&app),
             cancel: Arc::clone(&cancel),
         };
-        std::thread::spawn(move || runner.run(rx));
+        std::thread::spawn(move || runner.run(wake_rx));
 
         manager
     }
@@ -121,35 +127,35 @@ impl JobManager {
         asset_id: &str,
         stages: Vec<String>,
     ) -> AppResult<Option<JobCurrent>> {
-        let job = {
+        // Push the real job onto the queue under a short lock (no disk I/O held).
+        let reported = {
             let mut st = self.state.lock();
             st.counter += 1;
             let id = st.counter;
-            st.pending.push_back(id);
-            Job {
+            st.pending.push_back(Job {
                 id,
                 project: project.to_string(),
                 asset_id: asset_id.to_string(),
                 stages: stages.clone(),
+            });
+            // The JobCurrent we report back for this enqueue (state "queued").
+            JobCurrent {
+                id,
+                project: project.to_string(),
+                asset_id: asset_id.to_string(),
+                stages: stages.clone(),
+                state: "queued".to_string(),
             }
         };
-        // mark queued
+        // mark queued (store has its own lock — never held under the jobs mutex)
         for stage in &stages {
             store.update_stage(project, asset_id, stage, "queued", None, None)?;
         }
         self.emit_project(project);
 
-        // The JobCurrent we report back for this enqueue (state "queued").
-        let reported = JobCurrent {
-            id: job.id,
-            project: job.project.clone(),
-            asset_id: job.asset_id.clone(),
-            stages: job.stages.clone(),
-            state: "queued".to_string(),
-        };
-
-        self.tx
-            .send(job)
+        // Ring the doorbell so the worker wakes and drains the queue.
+        self.wake
+            .send(())
             .map_err(|e| AppError::msg(format!("file de jobs fermee: {e}")))?;
         self.emit_job();
 
@@ -159,15 +165,86 @@ impl JobManager {
     }
 
     pub fn snapshot(&self) -> JobSnapshot {
-        let st = self.state.lock();
-        JobSnapshot {
-            current: st.current.clone(),
-            // queue_size = pending minus the one currently running.
-            queue_size: st
-                .pending
-                .len()
-                .saturating_sub(if st.current.is_some() { 1 } else { 0 }),
+        build_snapshot(&self.state.lock())
+    }
+
+    /// Drop every queued job (keeping the one currently running) and reset their
+    /// stages back to `pending` so the assets stay cleanly re-runnable. The
+    /// running job is left alone — use `request_cancel` to stop that one.
+    pub fn clear_queue(&self, store: &Store) -> AppResult<()> {
+        let drained: Vec<Job> = {
+            let mut st = self.state.lock();
+            // Keep pending[0] when it is the running job; drain the queued tail.
+            let skip = if st.current.is_some() { 1 } else { 0 };
+            st.pending.drain(skip..).collect()
+        };
+        if drained.is_empty() {
+            return Ok(());
         }
+        let mut projects = BTreeSet::new();
+        for job in &drained {
+            for stage in &job.stages {
+                let _ =
+                    store.update_stage(&job.project, &job.asset_id, stage, "pending", None, None);
+            }
+            projects.insert(job.project.clone());
+        }
+        for p in &projects {
+            self.emit_project(p);
+        }
+        self.emit_job();
+        Ok(())
+    }
+
+    /// Remove one queued job by id and reset its stages to `pending`. The job
+    /// currently running (the queue head) cannot be removed this way — cancel it.
+    pub fn remove_queued(&self, store: &Store, job_id: u64) -> AppResult<()> {
+        let removed = {
+            let mut st = self.state.lock();
+            // The running job lives at pending[0]; never remove it here.
+            let running_head =
+                st.current.is_some() && st.pending.front().map(|j| j.id) == Some(job_id);
+            if running_head {
+                None
+            } else if let Some(pos) = st.pending.iter().position(|j| j.id == job_id) {
+                st.pending.remove(pos)
+            } else {
+                None
+            }
+        };
+        if let Some(job) = removed {
+            for stage in &job.stages {
+                let _ =
+                    store.update_stage(&job.project, &job.asset_id, stage, "pending", None, None);
+            }
+            self.emit_project(&job.project);
+            self.emit_job();
+        }
+        Ok(())
+    }
+}
+
+/// Build a `JobSnapshot` from the locked state. Shared by `JobManager::snapshot`
+/// and `Runner::emit_job` so the two emitters can't drift. The running job sits
+/// at `pending[0]`; the queued tail (`pending[1..]`) becomes the `pending` list.
+fn build_snapshot(st: &State) -> JobSnapshot {
+    let skip = if st.current.is_some() { 1 } else { 0 };
+    let pending = st
+        .pending
+        .iter()
+        .skip(skip)
+        .map(|j| JobCurrent {
+            id: j.id,
+            project: j.project.clone(),
+            asset_id: j.asset_id.clone(),
+            stages: j.stages.clone(),
+            state: "queued".to_string(),
+        })
+        .collect();
+    JobSnapshot {
+        current: st.current.clone(),
+        queue_size: st.pending.len().saturating_sub(skip),
+        pending,
     }
 }
 
@@ -185,16 +262,7 @@ struct Runner {
 impl Runner {
     fn emit_job(&self) {
         if let Some(app) = self.app.lock().as_ref() {
-            let snap = {
-                let st = self.state.lock();
-                JobSnapshot {
-                    current: st.current.clone(),
-                    queue_size: st
-                        .pending
-                        .len()
-                        .saturating_sub(if st.current.is_some() { 1 } else { 0 }),
-                }
-            };
+            let snap = build_snapshot(&self.state.lock());
             events::emit_job_changed(app, &snap);
         }
     }
@@ -205,31 +273,49 @@ impl Runner {
         }
     }
 
-    fn run(self, rx: Receiver<Job>) {
-        while let Ok(job) = rx.recv() {
-            {
-                let mut st = self.state.lock();
-                st.current = Some(JobCurrent {
-                    id: job.id,
-                    project: job.project.clone(),
-                    asset_id: job.asset_id.clone(),
-                    stages: job.stages.clone(),
-                    state: "running".to_string(),
-                });
+    fn run(self, wake: Receiver<()>) {
+        loop {
+            // Park until something is enqueued — no lock held while waiting.
+            if wake.recv().is_err() {
+                return; // all senders dropped — the app is exiting
             }
-            self.emit_job();
+            // Drain the queue: one wake may cover several enqueues, and some
+            // queued jobs may have been removed before we reach them.
+            loop {
+                let job = {
+                    let mut st = self.state.lock();
+                    match st.pending.front().cloned() {
+                        Some(job) => {
+                            // Mark it running but KEEP it at pending[0] until it
+                            // finishes, so clear/remove never touch the live job.
+                            st.current = Some(JobCurrent {
+                                id: job.id,
+                                project: job.project.clone(),
+                                asset_id: job.asset_id.clone(),
+                                stages: job.stages.clone(),
+                                state: "running".to_string(),
+                            });
+                            job
+                        }
+                        // Queue empty — go back to waiting on the doorbell.
+                        None => break,
+                    }
+                };
+                self.emit_job();
 
-            self.run_job(&job);
+                self.run_job(&job);
 
-            {
-                let mut st = self.state.lock();
-                st.current = None;
-                // remove this job id from the pending mirror
-                if let Some(pos) = st.pending.iter().position(|&x| x == job.id) {
-                    st.pending.remove(pos);
+                {
+                    let mut st = self.state.lock();
+                    st.current = None;
+                    // Pop the finished job, but only if it is still at the front
+                    // (defensive against a concurrent queue mutation).
+                    if st.pending.front().map(|j| j.id) == Some(job.id) {
+                        st.pending.pop_front();
+                    }
                 }
+                self.emit_job();
             }
-            self.emit_job();
         }
     }
 

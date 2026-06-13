@@ -87,6 +87,8 @@ export interface JobCurrent {
 export interface JobSnapshot {
   current: JobCurrent | null;
   queueSize: number;
+  /** Jobs waiting to run, in FIFO order (excludes `current`). */
+  pending: JobCurrent[];
 }
 
 export interface ProjectBundle {

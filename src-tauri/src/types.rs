@@ -297,6 +297,8 @@ pub struct JobCurrent {
 pub struct JobSnapshot {
     pub current: Option<JobCurrent>,
     pub queue_size: usize,
+    /// Jobs waiting to run, in FIFO order (excludes the one in `current`).
+    pub pending: Vec<JobCurrent>,
 }
 
 // --- ProjectBundle ------------------------------------------------------
